@@ -104,3 +104,23 @@ InitTestScene*.unity*
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# Python / Analytics
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.parquet
+*.joblib
+data/*.csv
+!data/.gitkeep
+
+# Infra secrets
+infra/secrets/
+*.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
