@@ -13,6 +13,11 @@ public class Bootstrap : MonoBehaviour
         var utp = NetworkManager.Singleton.GetComponent<UnityTransport>();
         var cfg = NetConfig.Instance;
 
+        NetworkManager.Singleton.OnClientConnectedCallback += (id) =>
+        Debug.Log($"[NET] Client CONNECTED id={id} (IsServer={NetworkManager.Singleton.IsServer})");
+        NetworkManager.Singleton.OnClientDisconnectCallback += (id) =>
+        Debug.Log($"[NET] Client DISCONNECTED id={id} reason={NetworkManager.Singleton.DisconnectReason}");
+
 #if UNITY_SERVER
         // 실제 Linux Dedicated Server 빌드에서만 이 분기를 탄다.
         utp.SetConnectionData(cfg.listenAddress, cfg.port, cfg.listenAddress);

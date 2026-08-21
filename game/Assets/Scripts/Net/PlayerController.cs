@@ -5,23 +5,28 @@ public class PlayerController : NetworkBehaviour
 {
     [SerializeField] private float moveSpeed = 5f;
     [SerializeField] private CharacterController cc;
-    [SerializeField] private Camera cam;              // ← 추가
-    [SerializeField] private AudioListener audioListener;  // ← 추가
+    [SerializeField] private Camera cam;
+    [SerializeField] private AudioListener audioListener;
+
+    [Header("Reconciliation")]
+    [SerializeField] private float reconcileThreshold = 0.05f;   // 5cm
 
     private CircularBuffer<InputPayload> inputBuffer = new(1024);
     private CircularBuffer<StatePayload> stateBuffer = new(1024);
 
-    // 서버가 마지막으로 처리한 입력의 tick (재전송/누락 감지용, Day 3에서 활용)
     private int lastProcessedTick = -1;
 
+    // 서버에서 온 미처리 상태 (RPC 콜백에서 담고 FixedUpdate에서 소비)
+    private StatePayload? pendingServerState = null;
 
     public override void OnNetworkSpawn()
     {
-        // 내 캐릭터의 카메라만 켠다. 남의 캐릭터 카메라는 꺼야 화면이 안 뺏긴다.
         bool mine = IsOwner;
+        Debug.Log($"[SPAWN] OwnerClientId={OwnerClientId} IsOwner={mine} IsServer={IsServer} pos={transform.position}");
         if (cam) cam.gameObject.SetActive(mine);
         if (audioListener) audioListener.enabled = mine;
     }
+
     void FixedUpdate()
     {
         if (NetworkTickSystem.Instance == null) return;
@@ -29,6 +34,23 @@ public class PlayerController : NetworkBehaviour
 
         if (IsOwner)
         {
+            // 1) 서버 상태가 도착해 있으면 먼저 재조정
+            if (pendingServerState.HasValue)
+            {
+                Reconcile(pendingServerState.Value, tick);
+                pendingServerState = null;
+            }
+
+            // 2) 치트 시뮬레이션 (테스트용 — W5 이후 제거)
+            if (Input.GetKeyDown(KeyCode.F9))
+            {
+                cc.enabled = false;
+                transform.position += transform.forward * 10f;
+                cc.enabled = true;
+                Debug.Log("[CHEAT] F9 teleport");
+            }
+
+            // 3) 이번 틱 입력 처리
             InputPayload input = GatherInput(tick);
             inputBuffer.Set(tick, input);
 
@@ -84,18 +106,44 @@ public class PlayerController : NetworkBehaviour
     {
         if (IsOwner)
         {
-            // Day 3: 여기서 예측 오차 비교 + 재조정(reconciliation) 수행
-            Reconcile(state);
+            // RPC 콜백에서 물리를 직접 건드리지 않고 다음 FixedUpdate로 넘긴다
+            pendingServerState = state;
         }
         else
         {
-            // 다른 클라이언트가 보는 원격 플레이어 — 그냥 위치 반영
             transform.position = state.position;
         }
     }
 
-    private void Reconcile(StatePayload serverState)
+    private void Reconcile(StatePayload serverState, int currentTick)
     {
-        // Day 3에서 구현
+        StatePayload predicted = stateBuffer.Get(serverState.tick);
+
+        Debug.Log($"[REC-IN] serverTick={serverState.tick} bufTick={predicted.tick} cur={currentTick}");
+
+        // 버퍼에 해당 tick 기록이 없으면(오래된 패킷 등) 무시
+        if (predicted.tick != serverState.tick) return;
+
+        float error = Vector3.Distance(predicted.position, serverState.position);
+        if (error < reconcileThreshold) return;
+
+        // --- 되감기 ---
+        cc.enabled = false;
+        transform.position = serverState.position;
+        cc.enabled = true;
+
+        stateBuffer.Set(serverState.tick, serverState);
+
+        // --- 재생(replay): 서버가 아직 모르는 이후 입력들을 다시 적용 ---
+        for (int t = serverState.tick + 1; t < currentTick; t++)
+        {
+            InputPayload input = inputBuffer.Get(t);
+            if (input.tick != t) continue;
+
+            StatePayload replayed = Simulate(input);
+            stateBuffer.Set(t, replayed);
+        }
+
+        Debug.Log($"[RECONCILE] tick={serverState.tick} error={error:F3}m");
     }
 }
