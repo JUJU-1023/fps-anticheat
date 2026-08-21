@@ -124,3 +124,13 @@ infra/secrets/
 # OS
 .DS_Store
 Thumbs.db
+
+
+game/Library/
+game/Temp/
+game/Logs/
+game/Build/
+game/UserSettings/
+game/obj/
+game/*.csproj
+game/*.sln
