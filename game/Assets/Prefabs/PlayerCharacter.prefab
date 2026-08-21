@@ -156,6 +156,8 @@ MonoBehaviour:
   ShowTopMostFoldoutHeaderGroup: 1
   moveSpeed: 5
   cc: {fileID: 6786231603726375578}
+  cam: {fileID: 5648740883280833906}
+  audioListener: {fileID: 1324566456409714534}
 --- !u!1 &4566249894887312130
 GameObject:
   m_ObjectHideFlags: 0

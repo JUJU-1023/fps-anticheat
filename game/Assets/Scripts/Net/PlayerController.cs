@@ -1,37 +1,42 @@
-using Unity.Netcode;
+ï»¿using Unity.Netcode;
 using UnityEngine;
 
 public class PlayerController : NetworkBehaviour
 {
     [SerializeField] private float moveSpeed = 5f;
     [SerializeField] private CharacterController cc;
+    [SerializeField] private Camera cam;              // â† ì¶”ê°€
+    [SerializeField] private AudioListener audioListener;  // â† ì¶”ê°€
 
     private CircularBuffer<InputPayload> inputBuffer = new(1024);
     private CircularBuffer<StatePayload> stateBuffer = new(1024);
 
-    void Update()
+    // ì„œë²„ê°€ ë§ˆì§€ë§‰ìœ¼ë¡œ ì²˜ë¦¬í•œ ì…ë ¥ì˜ tick (ì¬ì „ì†¡/ëˆ„ë½ ê°ì§€ìš©, Day 3ì—ì„œ í™œìš©)
+    private int lastProcessedTick = -1;
+
+
+    public override void OnNetworkSpawn()
     {
-        if (!IsOwner) return;
-        if (NetworkTickSystem.Instance == null) return;
-
-        // ´ÙÀ½ FixedUpdate¿¡¼­ Ã³¸®ÇÒ ÀÔ·ÂÀ» ¹Ì¸® ¸ğ¾ÆµÒ
+        // ë‚´ ìºë¦­í„°ì˜ ì¹´ë©”ë¼ë§Œ ì¼ ë‹¤. ë‚¨ì˜ ìºë¦­í„° ì¹´ë©”ë¼ëŠ” êº¼ì•¼ í™”ë©´ì´ ì•ˆ ëºê¸´ë‹¤.
+        bool mine = IsOwner;
+        if (cam) cam.gameObject.SetActive(mine);
+        if (audioListener) audioListener.enabled = mine;
     }
-
     void FixedUpdate()
     {
-        if (!IsOwner) return;
         if (NetworkTickSystem.Instance == null) return;
-
         int tick = NetworkTickSystem.Instance.CurrentTick;
 
-        InputPayload input = GatherInput(tick);
-        inputBuffer.Set(tick, input);
+        if (IsOwner)
+        {
+            InputPayload input = GatherInput(tick);
+            inputBuffer.Set(tick, input);
 
-        // ·ÎÄÃ ¿¹Ãø: ¼­¹ö¿Í µ¿ÀÏÇÑ ÀÌµ¿ ÇÔ¼ö·Î Áï½Ã Àû¿ë
-        StatePayload predicted = Simulate(input);
-        stateBuffer.Set(tick, predicted);
+            StatePayload predicted = Simulate(input);
+            stateBuffer.Set(tick, predicted);
 
-        SubmitInputServerRpc(input);
+            SubmitInputServerRpc(input);
+        }
     }
 
     private InputPayload GatherInput(int tick)
@@ -41,11 +46,12 @@ public class PlayerController : NetworkBehaviour
             tick = tick,
             move = new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical")),
             yaw = transform.eulerAngles.y,
-            pitch = 0f, // Ä«¸Ş¶ó pitch ÀÖÀ¸¸é ¿¬°á
+            pitch = 0f,
             buttons = 0
         };
     }
 
+    // í´ë¼/ì„œë²„ ê³µìš© ì´ë™ í•¨ìˆ˜ â€” ë°˜ë“œì‹œ ë™ì¼í•´ì•¼ í•¨
     private StatePayload Simulate(InputPayload input)
     {
         Vector3 dir = (transform.right * input.move.x + transform.forward * input.move.y).normalized;
@@ -65,6 +71,31 @@ public class PlayerController : NetworkBehaviour
     [ServerRpc]
     private void SubmitInputServerRpc(InputPayload input)
     {
-        // Day 2¿¡¼­ ¼­¹ö ½Ã¹Ä·¹ÀÌ¼Ç ±¸Çö
+        // â˜… V-MOVE ê²€ì¦ ì§€ì  (W6~W7ì—ì„œ ì—¬ê¸°ì— ì†ë„/í…”ë ˆí¬íŠ¸ ì²´í¬ ì¶”ê°€) â˜…
+
+        StatePayload authoritative = Simulate(input);
+        lastProcessedTick = input.tick;
+
+        BroadcastStateClientRpc(authoritative);
+    }
+
+    [ClientRpc]
+    private void BroadcastStateClientRpc(StatePayload state)
+    {
+        if (IsOwner)
+        {
+            // Day 3: ì—¬ê¸°ì„œ ì˜ˆì¸¡ ì˜¤ì°¨ ë¹„êµ + ì¬ì¡°ì •(reconciliation) ìˆ˜í–‰
+            Reconcile(state);
+        }
+        else
+        {
+            // ë‹¤ë¥¸ í´ë¼ì´ì–¸íŠ¸ê°€ ë³´ëŠ” ì›ê²© í”Œë ˆì´ì–´ â€” ê·¸ëƒ¥ ìœ„ì¹˜ ë°˜ì˜
+            transform.position = state.position;
+        }
+    }
+
+    private void Reconcile(StatePayload serverState)
+    {
+        // Day 3ì—ì„œ êµ¬í˜„
     }
 }
