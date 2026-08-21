@@ -11,12 +11,14 @@ public class ConnectUI : MonoBehaviour
     {
         var addr = addressInput != null ? addressInput.text : "";
         bootstrap.OnClickConnect(addr);
+        gameObject.SetActive(false);
     }
 
     // 에디터 테스트용 — 서버+클라 동시 실행
     public void OnHostPressed()
     {
         NetworkManager.Singleton.StartHost();
+        bootstrap.DisableLobbyCamera();
         Debug.Log("[HOST] started");
         gameObject.SetActive(false);
     }

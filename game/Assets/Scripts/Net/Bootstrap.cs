@@ -6,6 +6,7 @@ using UnityEngine;
 public class Bootstrap : MonoBehaviour
 {
     [SerializeField] GameObject connectUI;
+    [SerializeField] Camera lobbyCamera;   
 
     void Start()
     {
@@ -38,6 +39,12 @@ public class Bootstrap : MonoBehaviour
             string.IsNullOrEmpty(address) ? cfg.serverAddress : address,
             cfg.port);
         NetworkManager.Singleton.StartClient();
+        DisableLobbyCamera();   
         Debug.Log($"[CLIENT] connecting to {(string.IsNullOrEmpty(address) ? cfg.serverAddress : address)}:{cfg.port}");
+    }
+
+    public void DisableLobbyCamera()
+    {
+        if (lobbyCamera) lobbyCamera.gameObject.SetActive(false);
     }
 }

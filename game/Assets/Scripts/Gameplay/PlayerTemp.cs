@@ -11,6 +11,7 @@ public class PlayerTemp : NetworkBehaviour
 
     public override void OnNetworkSpawn()
     {
+        Debug.Log($"[SPAWN] OwnerClientId={OwnerClientId}, LocalClientId={NetworkManager.Singleton.LocalClientId}, IsOwner={IsOwner}, cam={(cam != null)}");
         if (cam) cam.gameObject.SetActive(IsOwner);
     }
 
@@ -23,4 +24,5 @@ public class PlayerTemp : NetworkBehaviour
         cc.Move(dir.normalized * speed * Time.deltaTime);
         cc.Move(Physics.gravity * Time.deltaTime);
     }
+
 }
