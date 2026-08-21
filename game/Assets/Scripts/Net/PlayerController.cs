@@ -115,6 +115,40 @@ public class PlayerController : NetworkBehaviour
         }
     }
 
+    /// <summary>서버가 권위적으로 위치를 이동시킨다 (스폰, 리스폰 등).</summary>
+    public void ServerTeleport(Vector3 position)
+    {
+        if (!IsServer) return;
+
+        cc.enabled = false;
+        transform.position = position;
+        cc.enabled = true;
+
+        // 클라이언트에게 즉시 알린다.
+        var state = new StatePayload
+        {
+            tick = NetworkTickSystem.Instance != null ? NetworkTickSystem.Instance.CurrentTick : 0,
+            position = position,
+            velocity = Vector3.zero,
+            yaw = transform.eulerAngles.y,
+            pitch = 0f
+        };
+        ForceStateClientRpc(state);
+    }
+
+    [ClientRpc]
+    private void ForceStateClientRpc(StatePayload state)
+    {
+        cc.enabled = false;
+        transform.position = state.position;
+        cc.enabled = true;
+
+        if (IsOwner)
+        {
+            // 예측 버퍼를 서버 상태로 리셋 — 이후 replay가 엉뚱한 위치에서 시작하지 않도록
+            stateBuffer.Set(state.tick, state);
+        }
+    }
     private void Reconcile(StatePayload serverState, int currentTick)
     {
         StatePayload predicted = stateBuffer.Get(serverState.tick);
