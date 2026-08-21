@@ -6,7 +6,7 @@ using UnityEngine;
 public class Bootstrap : MonoBehaviour
 {
     [SerializeField] GameObject connectUI;
-    [SerializeField] Camera lobbyCamera;   
+    [SerializeField] Camera lobbyCamera;
 
     void Start()
     {
@@ -16,15 +16,14 @@ public class Bootstrap : MonoBehaviour
 #if UNITY_SERVER
         utp.SetConnectionData(cfg.listenAddress, cfg.port, cfg.listenAddress);
         NetworkManager.Singleton.StartServer();
-        Debug.Log($"[SERVER] listening on {cfg.listenAddress}:{cfg.port}");
+        GameLog.Info("SERVER_START");                                    // ← 추가
         if (connectUI) connectUI.SetActive(false);
 #else
-        // 헤드리스(-batchmode)로 실행된 경우도 서버로 취급 (에디터 테스트 대비)
         if (Array.IndexOf(Environment.GetCommandLineArgs(), "-batchmode") >= 0)
         {
             utp.SetConnectionData(cfg.listenAddress, cfg.port, cfg.listenAddress);
             NetworkManager.Singleton.StartServer();
-            Debug.Log($"[SERVER] listening on {cfg.listenAddress}:{cfg.port}");
+            GameLog.Info("SERVER_START");
             return;
         }
         if (connectUI) connectUI.SetActive(true);
@@ -35,12 +34,11 @@ public class Bootstrap : MonoBehaviour
     {
         var utp = NetworkManager.Singleton.GetComponent<UnityTransport>();
         var cfg = NetConfig.Instance;
-        utp.SetConnectionData(
-            string.IsNullOrEmpty(address) ? cfg.serverAddress : address,
-            cfg.port);
+        var target = string.IsNullOrEmpty(address) ? cfg.serverAddress : address;
+        utp.SetConnectionData(target, cfg.port);
         NetworkManager.Singleton.StartClient();
-        DisableLobbyCamera();   
-        Debug.Log($"[CLIENT] connecting to {(string.IsNullOrEmpty(address) ? cfg.serverAddress : address)}:{cfg.port}");
+        DisableLobbyCamera();
+        GameLog.Info("CLIENT_CONNECT");                                  // ← 교체
     }
 
     public void DisableLobbyCamera()
