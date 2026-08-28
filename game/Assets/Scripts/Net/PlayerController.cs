@@ -13,6 +13,7 @@ public class PlayerController : NetworkBehaviour
 
     private CircularBuffer<InputPayload> inputBuffer = new(1024);
     private CircularBuffer<StatePayload> stateBuffer = new(1024);
+    private RemotePlayerInterpolator interpolator;
 
     private int lastProcessedTick = -1;
 
@@ -25,6 +26,8 @@ public class PlayerController : NetworkBehaviour
         Debug.Log($"[SPAWN] OwnerClientId={OwnerClientId} IsOwner={mine} IsServer={IsServer} pos={transform.position}");
         if (cam) cam.gameObject.SetActive(mine);
         if (audioListener) audioListener.enabled = mine;
+
+        interpolator = GetComponent<RemotePlayerInterpolator>();
     }
 
     void FixedUpdate()
@@ -111,7 +114,8 @@ public class PlayerController : NetworkBehaviour
         }
         else
         {
-            transform.position = state.position;
+            if (interpolator != null)
+                interpolator.EnqueueState(state);
         }
     }
 
