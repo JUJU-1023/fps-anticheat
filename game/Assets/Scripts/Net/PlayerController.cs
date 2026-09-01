@@ -3,7 +3,23 @@ using UnityEngine;
 
 public class PlayerController : NetworkBehaviour
 {
+    [Header("Movement")]
     [SerializeField] private float moveSpeed = 5f;
+    [SerializeField] private float sprintMultiplier = 1.6f;
+    [SerializeField] private float crouchMultiplier = 0.5f;
+
+    [Header("Jump / Gravity")]
+    [Tooltip("점프 최고 높이(m). 초기 상승 속도는 이 값에서 역산한다.")]
+    [SerializeField] private float jumpHeight = 1.2f;
+    [Tooltip("중력 가속도(m/s^2). 양수로 입력한다.")]
+    [SerializeField] private float gravity = 20f;
+    [Tooltip("지면에 붙어 있을 때 유지할 하향 속도. 0이면 경사에서 붕 뜬다.")]
+    [SerializeField] private float groundedStickVelocity = -2f;
+
+    [Header("Look")]
+    [SerializeField] private float mouseSensitivity = 2f;
+
+    [Header("References")]
     [SerializeField] private CharacterController cc;
     [SerializeField] private Camera cam;
     [SerializeField] private AudioListener audioListener;
@@ -11,11 +27,37 @@ public class PlayerController : NetworkBehaviour
     [Header("Reconciliation")]
     [SerializeField] private float reconcileThreshold = 0.05f;   // 5cm
 
+    // --- 지면 판정 ---
+    // 평평한 지형 1개 전제. 바닥 표면 y = -1, CharacterController Height=2/Center=(0,0,0)
+    // 이므로 캡슐 중심(Transform.y)이 0일 때 지면에 서 있는 상태다.
+    // CharacterController.isGrounded는 Move() 호출 결과에 의존해 replay 시 값이
+    // 달라질 수 있으므로 쓰지 않는다 (결정론 유지).
+    private const float GROUND_Y = 0f;
+    private const float GROUND_EPSILON = 0.02f;
+
+    // --- 입력 비트 마스크 (InputPayload.buttons) ---
+    private const byte BTN_JUMP = 1 << 0;
+    private const byte BTN_FIRE = 1 << 1;
+    private const byte BTN_CROUCH = 1 << 2;
+    private const byte BTN_SPRINT = 1 << 3;
+
     private CircularBuffer<InputPayload> inputBuffer = new(1024);
     private CircularBuffer<StatePayload> stateBuffer = new(1024);
-    private RemotePlayerInterpolator interpolator;
 
     private int lastProcessedTick = -1;
+
+    // 서버에서 온 미처리 상태 (RPC 콜백에서 담고 FixedUpdate에서 소비)
+    private StatePayload? pendingServerState = null;
+
+    private RemotePlayerInterpolator interpolator;
+
+    // --- 시뮬레이션 상태 ---
+    // 수직 속도는 위치와 별개로 유지되는 상태다. 재조정 시 위치만 되돌리고
+    // 이 값을 복원하지 않으면 공중에서 예측이 발산한다.
+    private float verticalVelocity = 0f;
+
+    private float currentYaw = 0f;
+    private float currentPitch = 0f;
 
     // --- RTT 측정 ---
     private CircularBuffer<float> sendTimeBuffer = new(1024);
@@ -27,12 +69,6 @@ public class PlayerController : NetworkBehaviour
     private int totalReconcileChecks = 0;
     private float maxError = 0f;
 
-    [Header("Look")]
-    [SerializeField] private float mouseSensitivity = 2f;
-    private float currentYaw = 0f;
-    // 서버에서 온 미처리 상태 (RPC 콜백에서 담고 FixedUpdate에서 소비)
-    private StatePayload? pendingServerState = null;
-
     public override void OnNetworkSpawn()
     {
         bool mine = IsOwner;
@@ -41,6 +77,8 @@ public class PlayerController : NetworkBehaviour
         if (audioListener) audioListener.enabled = mine;
 
         interpolator = GetComponent<RemotePlayerInterpolator>();
+
+        currentYaw = transform.eulerAngles.y;
     }
 
     void FixedUpdate()
@@ -57,7 +95,7 @@ public class PlayerController : NetworkBehaviour
                 pendingServerState = null;
             }
 
-            // 2) 치트 시뮬레이션 (테스트용 — W5 이후 제거)
+            // 2) 치트 시뮬레이션 (테스트용 — W6 치트 플러그인으로 대체 예정)
             if (Input.GetKeyDown(KeyCode.F9))
             {
                 cc.enabled = false;
@@ -92,47 +130,117 @@ public class PlayerController : NetworkBehaviour
         }
     }
 
-    private InputPayload GatherInput(int tick)
+    void Update()
     {
-        // yaw를 입력으로 직접 누적 (transform에서 읽지 않는다)
+        // 마우스 입력은 프레임 단위로 들어오므로 Update에서 누적한다.
+        // FixedUpdate에서 GetAxisRaw를 읽으면 프레임률에 따라 입력이 유실된다.
+        if (!IsOwner) return;
+
         currentYaw += Input.GetAxisRaw("Mouse X") * mouseSensitivity;
         currentYaw = Mathf.Repeat(currentYaw, 360f);
+
+        currentPitch -= Input.GetAxisRaw("Mouse Y") * mouseSensitivity;
+        currentPitch = Mathf.Clamp(currentPitch, -89f, 89f);
+
+        if (cam) cam.transform.localRotation = Quaternion.Euler(currentPitch, 0f, 0f);
+    }
+
+    private InputPayload GatherInput(int tick)
+    {
+        byte buttons = 0;
+        if (Input.GetKey(KeyCode.Space)) buttons |= BTN_JUMP;
+        if (Input.GetKey(KeyCode.LeftControl)) buttons |= BTN_CROUCH;
+        if (Input.GetKey(KeyCode.LeftShift)) buttons |= BTN_SPRINT;
+
+        if (buttons != 0) Debug.Log($"[INPUT] buttons={buttons}");
 
         return new InputPayload
         {
             tick = tick,
             move = new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical")),
             yaw = currentYaw,
-            pitch = 0f,
-            buttons = 0
+            pitch = currentPitch,
+            buttons = buttons
         };
     }
 
-    // 클라/서버 공용 이동 함수 — 반드시 결정론적이어야 함
+    /// <summary>
+    /// 클라/서버 공용 이동 함수. 같은 InputPayload와 같은 시작 상태를 주면
+    /// 반드시 같은 StatePayload가 나와야 한다 (결정론).
+    /// transform.right/forward를 쓰지 않고 input.yaw로 방향을 재구성하는 이유가 그것이다.
+    /// </summary>
     private StatePayload Simulate(InputPayload input)
     {
-        // transform.right/forward 대신 input.yaw로 방향을 재구성한다.
-        // 이렇게 해야 replay 시점의 회전 상태와 무관하게 항상 같은 결과가 나온다.
+        float dt = NetworkTickSystem.TickInterval;
+
+        // --- 수평 이동 ---
         Quaternion rot = Quaternion.Euler(0f, input.yaw, 0f);
         Vector3 right = rot * Vector3.right;
         Vector3 forward = rot * Vector3.forward;
-
         Vector3 dir = (right * input.move.x + forward * input.move.y).normalized;
 
-        cc.Move(dir * moveSpeed * NetworkTickSystem.TickInterval);
-        cc.Move(Physics.gravity * NetworkTickSystem.TickInterval);
+        float speed = moveSpeed;
+        bool crouching = (input.buttons & BTN_CROUCH) != 0;
+        bool sprinting = (input.buttons & BTN_SPRINT) != 0;
 
-        // 시뮬레이션 결과로 회전도 확정한다
+        // 앉기가 달리기보다 우선한다 (동시 입력 시 규칙을 고정해야 서버/클라가 일치한다)
+        if (crouching) speed *= crouchMultiplier;
+        else if (sprinting) speed *= sprintMultiplier;
+
+        // --- 수직 이동 ---
+        bool grounded = IsGrounded();
+
+        if (grounded && verticalVelocity <= 0f)
+        {
+            // 지면에 붙어 있는 동안은 약한 하향 속도를 유지한다.
+            verticalVelocity = groundedStickVelocity;
+
+            if ((input.buttons & BTN_JUMP) != 0)
+            {
+                // v = sqrt(2 * g * h)
+                verticalVelocity = Mathf.Sqrt(2f * gravity * jumpHeight);
+            }
+        }
+        else
+        {
+            // 공중: 가속도를 속도에 누적한다.
+            verticalVelocity -= gravity * dt;
+        }
+
+        Vector3 motion = dir * speed;
+        motion.y = verticalVelocity;
+
+        cc.Move(motion * dt);
+
+        // 바닥을 뚫고 내려가지 않도록 보정 (평평한 지형 전제)
+        if (transform.position.y < GROUND_Y)
+        {
+            Vector3 p = transform.position;
+            p.y = GROUND_Y;
+            cc.enabled = false;
+            transform.position = p;
+            cc.enabled = true;
+            verticalVelocity = groundedStickVelocity;
+        }
+
         transform.rotation = rot;
+
+        Vector3 outVelocity = dir * speed;
+        outVelocity.y = verticalVelocity;
 
         return new StatePayload
         {
             tick = input.tick,
             position = transform.position,
-            velocity = dir * moveSpeed,
+            velocity = outVelocity,
             yaw = input.yaw,
             pitch = input.pitch
         };
+    }
+
+    private bool IsGrounded()
+    {
+        return transform.position.y <= GROUND_Y + GROUND_EPSILON;
     }
 
     [ServerRpc]
@@ -156,7 +264,6 @@ public class PlayerController : NetworkBehaviour
             if (sentAt > 0f)
             {
                 float sample = (Time.realtimeSinceStartup - sentAt) * 1000f;
-                // 지수이동평균(EMA)으로 튀는 값을 완화한다
                 currentRttMs = Mathf.Lerp(currentRttMs, sample, 0.1f);
             }
 
@@ -178,8 +285,8 @@ public class PlayerController : NetworkBehaviour
         cc.enabled = false;
         transform.position = position;
         cc.enabled = true;
+        verticalVelocity = 0f;
 
-        // 클라이언트에게 즉시 알린다.
         var state = new StatePayload
         {
             tick = NetworkTickSystem.Instance != null ? NetworkTickSystem.Instance.CurrentTick : 0,
@@ -197,37 +304,39 @@ public class PlayerController : NetworkBehaviour
         cc.enabled = false;
         transform.position = state.position;
         cc.enabled = true;
+        verticalVelocity = state.velocity.y;
 
         if (IsOwner)
         {
-            // 예측 버퍼를 서버 상태로 리셋 — 이후 replay가 엉뚱한 위치에서 시작하지 않도록
+            currentYaw = state.yaw;
             stateBuffer.Set(state.tick, state);
         }
     }
+
     private void Reconcile(StatePayload serverState, int currentTick)
     {
         StatePayload predicted = stateBuffer.Get(serverState.tick);
-
-        Debug.Log($"[REC-IN] serverTick={serverState.tick} bufTick={predicted.tick} cur={currentTick}");
 
         // 버퍼에 해당 tick 기록이 없으면(오래된 패킷 등) 무시
         if (predicted.tick != serverState.tick) return;
 
         float error = Vector3.Distance(predicted.position, serverState.position);
 
-        // 통계 집계 (임계값 미만이어도 오차 자체는 기록한다)
         totalReconcileChecks++;
         if (error > maxError) maxError = error;
 
         if (error < reconcileThreshold) return;
 
-        reconcileCount++;   // 실제로 되감기가 발생한 횟수
+        reconcileCount++;
 
         // --- 되감기 ---
         cc.enabled = false;
         transform.position = serverState.position;
         transform.rotation = Quaternion.Euler(0f, serverState.yaw, 0f);
         cc.enabled = true;
+
+        // 수직 속도도 서버 값으로 되돌린다. 이걸 빼면 공중 재조정 후 낙하가 어긋난다.
+        verticalVelocity = serverState.velocity.y;
 
         stateBuffer.Set(serverState.tick, serverState);
 

@@ -156,6 +156,12 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   ShowTopMostFoldoutHeaderGroup: 1
   moveSpeed: 5
+  sprintMultiplier: 1.6
+  crouchMultiplier: 0.5
+  jumpHeight: 1.2
+  gravity: 20
+  groundedStickVelocity: -2
+  mouseSensitivity: 2
   cc: {fileID: 6786231603726375578}
   cam: {fileID: 5648740883280833906}
   audioListener: {fileID: 1324566456409714534}
