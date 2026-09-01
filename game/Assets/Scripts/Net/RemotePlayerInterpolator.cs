@@ -37,7 +37,7 @@ public class RemotePlayerInterpolator : MonoBehaviour
     /// </summary>
     public void EnqueueState(StatePayload state)
     {
-        if (netObj != null && netObj.IsOwner) return; // 소유자는 절대 버퍼링하지 않음
+        if (ShouldSkip()) return;  // 소유자는 절대 버퍼링하지 않음
 
         stateBuffer.Set(state.tick, state);
         if (state.tick > latestTick) latestTick = state.tick;
@@ -46,7 +46,7 @@ public class RemotePlayerInterpolator : MonoBehaviour
 
     private void Update()
     {
-        if (netObj != null && netObj.IsOwner) return;
+        if (ShouldSkip()) return; ;
         if (receivedCount < MIN_SNAPSHOTS_TO_INTERPOLATE || latestTick < 0) return;
         if (NetworkTickSystem.TickInterval <= 0f) return;
 
@@ -62,6 +62,8 @@ public class RemotePlayerInterpolator : MonoBehaviour
 
         // 슬롯이 그 틱의 값이 아니면(아직 안 왔거나 덮어써짐) 보간하지 않고
         // 마지막으로 그려진 위치를 유지한다 (뚝뚝 끊기더라도 순간이동보다 낫다)
+        if (Time.frameCount % 30 == 0)
+            Debug.Log($"[INTERP] latest={latestTick} target={targetTick:F2} from={fromTick}(got {from.tick}) to={toTick}(got {to.tick})");
         if (from.tick != fromTick || to.tick != toTick)
             return;
 
@@ -71,5 +73,22 @@ public class RemotePlayerInterpolator : MonoBehaviour
 
         float yaw = Mathf.LerpAngle(from.yaw, to.yaw, t);
         transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+    }
+
+    /// <summary>
+    /// 보간을 수행하면 안 되는 경우:
+    ///  - 내가 소유한 플레이어 (예측/재조정이 담당)
+    ///  - 서버/호스트 (권위 있는 위치를 과거 값으로 덮어쓰면 안 됨)
+    /// </summary>
+    private bool ShouldSkip()
+    {
+        if (netObj == null) return true;
+        if (netObj.IsOwner) return true;
+
+        var nm = NetworkManager.Singleton;
+        if (nm != null && nm.IsServer) return true;   // ★ 핵심 수정
+
+        return false;
+
     }
 }

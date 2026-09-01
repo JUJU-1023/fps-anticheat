@@ -17,6 +17,19 @@ public class PlayerController : NetworkBehaviour
 
     private int lastProcessedTick = -1;
 
+    // --- RTT 측정 ---
+    private CircularBuffer<float> sendTimeBuffer = new(1024);
+    private float currentRttMs = 0f;
+    public float CurrentRttMs => currentRttMs;
+
+    // --- 재조정 통계 ---
+    private int reconcileCount = 0;
+    private int totalReconcileChecks = 0;
+    private float maxError = 0f;
+
+    [Header("Look")]
+    [SerializeField] private float mouseSensitivity = 2f;
+    private float currentYaw = 0f;
     // 서버에서 온 미처리 상태 (RPC 콜백에서 담고 FixedUpdate에서 소비)
     private StatePayload? pendingServerState = null;
 
@@ -60,28 +73,57 @@ public class PlayerController : NetworkBehaviour
             StatePayload predicted = Simulate(input);
             stateBuffer.Set(tick, predicted);
 
+            sendTimeBuffer.Set(tick, Time.realtimeSinceStartup);
+
             SubmitInputServerRpc(input);
+
+            // 4) 5초마다 통계 출력
+            if (tick % 300 == 0)
+            {
+                float rate = totalReconcileChecks > 0
+                    ? (float)reconcileCount / totalReconcileChecks * 100f
+                    : 0f;
+                Debug.Log($"[STAT] RTT={currentRttMs:F1}ms 재조정률={rate:F1}% ({reconcileCount}/{totalReconcileChecks}) 최대오차={maxError:F3}m");
+
+                reconcileCount = 0;
+                totalReconcileChecks = 0;
+                maxError = 0f;
+            }
         }
     }
 
     private InputPayload GatherInput(int tick)
     {
+        // yaw를 입력으로 직접 누적 (transform에서 읽지 않는다)
+        currentYaw += Input.GetAxisRaw("Mouse X") * mouseSensitivity;
+        currentYaw = Mathf.Repeat(currentYaw, 360f);
+
         return new InputPayload
         {
             tick = tick,
             move = new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical")),
-            yaw = transform.eulerAngles.y,
+            yaw = currentYaw,
             pitch = 0f,
             buttons = 0
         };
     }
 
-    // 클라/서버 공용 이동 함수 — 반드시 동일해야 함
+    // 클라/서버 공용 이동 함수 — 반드시 결정론적이어야 함
     private StatePayload Simulate(InputPayload input)
     {
-        Vector3 dir = (transform.right * input.move.x + transform.forward * input.move.y).normalized;
+        // transform.right/forward 대신 input.yaw로 방향을 재구성한다.
+        // 이렇게 해야 replay 시점의 회전 상태와 무관하게 항상 같은 결과가 나온다.
+        Quaternion rot = Quaternion.Euler(0f, input.yaw, 0f);
+        Vector3 right = rot * Vector3.right;
+        Vector3 forward = rot * Vector3.forward;
+
+        Vector3 dir = (right * input.move.x + forward * input.move.y).normalized;
+
         cc.Move(dir * moveSpeed * NetworkTickSystem.TickInterval);
         cc.Move(Physics.gravity * NetworkTickSystem.TickInterval);
+
+        // 시뮬레이션 결과로 회전도 확정한다
+        transform.rotation = rot;
 
         return new StatePayload
         {
@@ -109,6 +151,15 @@ public class PlayerController : NetworkBehaviour
     {
         if (IsOwner)
         {
+            // --- RTT 계산 ---
+            float sentAt = sendTimeBuffer.Get(state.tick);
+            if (sentAt > 0f)
+            {
+                float sample = (Time.realtimeSinceStartup - sentAt) * 1000f;
+                // 지수이동평균(EMA)으로 튀는 값을 완화한다
+                currentRttMs = Mathf.Lerp(currentRttMs, sample, 0.1f);
+            }
+
             // RPC 콜백에서 물리를 직접 건드리지 않고 다음 FixedUpdate로 넘긴다
             pendingServerState = state;
         }
@@ -163,11 +214,19 @@ public class PlayerController : NetworkBehaviour
         if (predicted.tick != serverState.tick) return;
 
         float error = Vector3.Distance(predicted.position, serverState.position);
+
+        // 통계 집계 (임계값 미만이어도 오차 자체는 기록한다)
+        totalReconcileChecks++;
+        if (error > maxError) maxError = error;
+
         if (error < reconcileThreshold) return;
+
+        reconcileCount++;   // 실제로 되감기가 발생한 횟수
 
         // --- 되감기 ---
         cc.enabled = false;
         transform.position = serverState.position;
+        transform.rotation = Quaternion.Euler(0f, serverState.yaw, 0f);
         cc.enabled = true;
 
         stateBuffer.Set(serverState.tick, serverState);
