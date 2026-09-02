@@ -47,7 +47,7 @@ public class SpawnManager : MonoBehaviour
         if (pc != null) pc.ServerTeleport(pos);
     }
 
-    private Vector3 GetNextSpawnPosition()
+    public Vector3 GetNextSpawnPosition()
     {
         if (spawnPoints.Count == 0)
             return new Vector3(0f, 1f, 0f);

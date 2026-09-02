@@ -65,6 +65,8 @@ public class PlayerController : NetworkBehaviour
     /// <summary>V-MOVE-01 검증기. 서버에서만 생성된다.</summary>
     private MovementValidator validator;
     private CheatHarness cheat;
+    private WeaponSystem weapon;
+    private PlayerHealth health;
 
     // --- 시뮬레이션 상태 ---
     // 수직 속도는 위치와 별개로 유지되는 상태다. 재조정 시 위치만 되돌리고
@@ -97,11 +99,19 @@ public class PlayerController : NetworkBehaviour
         interpolator = GetComponent<RemotePlayerInterpolator>();
         telemetry = GetComponent<PlayerTelemetry>();
         cheat = GetComponent<CheatHarness>();
+        weapon = GetComponent<WeaponSystem>();
+        health = GetComponent<PlayerHealth>();
 
         if (IsServer)
             validator = new MovementValidator(Time.realtimeSinceStartup);
 
         currentYaw = transform.eulerAngles.y;
+
+        if (IsOwner)                                        // ← 추가
+        {
+            Cursor.lockState = CursorLockMode.Locked;
+            Cursor.visible = false;
+        }
     }
 
     void FixedUpdate()
@@ -111,6 +121,13 @@ public class PlayerController : NetworkBehaviour
 
         if (IsOwner)
         {
+            // 사망 중에는 입력을 만들지 않는다.
+            if (health != null && health.IsDead)
+            {
+                pendingServerState = null;
+                return;
+            }
+
             // 1) 서버 상태가 도착해 있으면 먼저 재조정
             if (pendingServerState.HasValue)
             {
@@ -200,6 +217,20 @@ public class PlayerController : NetworkBehaviour
         // FixedUpdate에서 GetAxisRaw를 읽으면 프레임률에 따라 입력이 유실된다.
         if (!IsOwner) return;
 
+        if (Input.GetKeyDown(KeyCode.Escape))
+        {
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
+        }
+        if (Input.GetMouseButtonDown(0) && Cursor.lockState != CursorLockMode.Locked)
+        {
+            Cursor.lockState = CursorLockMode.Locked;
+            Cursor.visible = false;
+            return;                    // 이 클릭은 발사로 치지 않는다
+        }
+
+        if (health != null && health.IsDead) return;   // ← 추가. 사망 카메라와 충돌 방지
+
         currentYaw += Input.GetAxisRaw("Mouse X") * mouseSensitivity;
         currentYaw = Mathf.Repeat(currentYaw, 360f);
 
@@ -215,6 +246,20 @@ public class PlayerController : NetworkBehaviour
         if (Input.GetKey(KeyCode.Space)) buttons |= BTN_JUMP;
         if (Input.GetKey(KeyCode.LeftControl)) buttons |= BTN_CROUCH;
         if (Input.GetKey(KeyCode.LeftShift)) buttons |= BTN_SPRINT;
+        if (Input.GetMouseButton(0)) buttons |= BTN_FIRE;
+
+        // 반동을 시야에 적용한다. 서버도 같은 패턴을 알고 있어
+        // 조작 시 서버 계산과 어긋난다(W8 노리코일 탐지).
+        if (weapon != null)
+        {
+            Vector2 recoil = weapon.ClientTryFire(tick, (buttons & BTN_FIRE) != 0);
+            if (recoil != Vector2.zero)
+            {
+                currentYaw = Mathf.Repeat(currentYaw + recoil.x, 360f);
+                currentPitch = Mathf.Clamp(currentPitch - recoil.y, -89f, 89f);
+                if (cam) cam.transform.localRotation = Quaternion.Euler(currentPitch, 0f, 0f);
+            }
+        }
 
         return new InputPayload
         {
@@ -224,6 +269,8 @@ public class PlayerController : NetworkBehaviour
             pitch = currentPitch,
             buttons = buttons
         };
+
+
     }
 
     /// <summary>
@@ -361,6 +408,18 @@ public class PlayerController : NetworkBehaviour
         }
 
         BroadcastStateClientRpc(authoritative);
+        // ★ W6.5 사격 ★
+        weapon?.ServerProcessInput(input, serverTick, ServerRttMs());
+    }
+
+    /// <summary>서버 측정 RTT. 클라이언트 보고값을 쓰지 않는다.</summary>
+    private int ServerRttMs()
+    {
+        var nm = NetworkManager.Singleton;
+        if (nm == null || nm.NetworkConfig?.NetworkTransport == null) return -1;
+        if (nm.IsHost && OwnerClientId == nm.LocalClientId) return 0;
+        try { return (int)nm.NetworkConfig.NetworkTransport.GetCurrentRtt(OwnerClientId); }
+        catch { return -1; }
     }
 
     [ClientRpc]
