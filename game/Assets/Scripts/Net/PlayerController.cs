@@ -62,6 +62,10 @@ public class PlayerController : NetworkBehaviour
     private RemotePlayerInterpolator interpolator;
     private PlayerTelemetry telemetry;
 
+    /// <summary>V-MOVE-01 검증기. 서버에서만 생성된다.</summary>
+    private MovementValidator validator;
+    private CheatHarness cheat;
+
     // --- 시뮬레이션 상태 ---
     // 수직 속도는 위치와 별개로 유지되는 상태다. 재조정 시 위치만 되돌리고
     // 이 값을 복원하지 않으면 공중에서 예측이 발산한다.
@@ -92,6 +96,10 @@ public class PlayerController : NetworkBehaviour
 
         interpolator = GetComponent<RemotePlayerInterpolator>();
         telemetry = GetComponent<PlayerTelemetry>();
+        cheat = GetComponent<CheatHarness>();
+
+        if (IsServer)
+            validator = new MovementValidator(Time.realtimeSinceStartup);
 
         currentYaw = transform.eulerAngles.y;
     }
@@ -110,7 +118,7 @@ public class PlayerController : NetworkBehaviour
                 pendingServerState = null;
             }
 
-            // 2) 치트 시뮬레이션 (테스트용 — W6 치트 플러그인으로 대체 예정)
+            // 2) 치트 시뮬레이션 (테스트용 — 커밋 시 CheatHarness로 분리 예정)
             if (Input.GetKeyDown(KeyCode.F9))
             {
                 cc.enabled = false;
@@ -127,6 +135,47 @@ public class PlayerController : NetworkBehaviour
             stateBuffer.Set(tick, predicted);
 
             sendTimeBuffer.Set(tick, Time.realtimeSinceStartup);
+
+            // --- 치트 하네스 (테스트 전용) ---
+            // 실제 스피드핵과 같은 경로로 공격한다: 입력을 더 많이 보낸다.
+            if (cheat != null && cheat.Active)
+            {
+                switch (cheat.Pending)
+                {
+                    case CheatHarness.OneShot.TickReplay:
+                        for (int i = 0; i < 20; i++)
+                            SubmitInputServerRpc(input);      // 같은 틱 반복
+                        cheat.ConsumeOneShot();
+                        return;
+
+                    case CheatHarness.OneShot.TickAhead:
+                        var ahead = input;
+                        ahead.tick = tick + 600;              // 10초 앞
+                        SubmitInputServerRpc(ahead);
+                        cheat.ConsumeOneShot();
+                        return;
+
+                    case CheatHarness.OneShot.BadInput:
+                        var bad = input;
+                        bad.move = new Vector2(10f, 10f);
+                        bad.yaw = float.NaN;
+                        SubmitInputServerRpc(bad);
+                        cheat.ConsumeOneShot();
+                        return;
+                }
+
+                // 스피드핵: 같은 틱을 배율만큼 전송.
+                // 시간 조작 시 FixedUpdate가 더 자주 도는 것과
+                // 서버 관측 결과가 동일하다.
+                int mul = cheat.SpeedMultiplier;
+                for (int i = 0; i < mul; i++)
+                {
+                    var fast = input;
+                    fast.tick = cheat.NextFakeTick(tick);
+                    SubmitInputServerRpc(fast);
+                }
+                return;
+            }
 
             SubmitInputServerRpc(input);
 
@@ -261,10 +310,38 @@ public class PlayerController : NetworkBehaviour
     [ServerRpc]
     private void SubmitInputServerRpc(InputPayload input)
     {
-        // ★ V-MOVE 검증 지점 (W6 Day 3~4에서 여기에 삽입) ★
-        //   - 입력 수신율 (토큰 버킷)  : 스피드핵
-        //   - lastProcessedTick 역행   : 리플레이/중복 전송
-        //   - NaN / 입력 크기 검사     : 값 위조
+        int serverTick = NetworkTickSystem.Instance != null
+                       ? NetworkTickSystem.Instance.CurrentTick
+                       : input.tick;
+
+        // =============================================================
+        //  ★ V-MOVE-01 (W6-D3) ★
+        //
+        //  위반이면 Simulate()를 아예 호출하지 않는다.
+        //  롤백이 아니라 "서버가 움직여주지 않는다"가 처벌이다.
+        //  클라이언트는 예측이 어긋나 다음 재조정에서 되돌아온다.
+        //  이미 만들어 둔 재조정 메커니즘이 그대로 교정 수단이 된다.
+        // =============================================================
+        if (validator != null)
+        {
+            var reason = validator.Validate(
+                Time.realtimeSinceStartup,
+                input.tick, lastProcessedTick,
+                input.move, input.yaw, input.pitch);
+
+            if (reason != MoveRejectReason.None)
+            {
+                ViolationLogger.Report(
+                    clientId: OwnerClientId,
+                    playerUid: telemetry != null ? telemetry.PlayerUid : "unknown",
+                    code: VMove.CODE,
+                    tick: serverTick,
+                    severity: 2,
+                    detail: reason.ToString(),
+                    rttMs: -1);
+                return;
+            }
+        }
 
         StatePayload authoritative = Simulate(input);
         lastProcessedTick = input.tick;
@@ -273,9 +350,7 @@ public class PlayerController : NetworkBehaviour
         if (telemetry != null)
         {
             telemetry.OnServerInput(
-                serverTick: NetworkTickSystem.Instance != null
-                            ? NetworkTickSystem.Instance.CurrentTick
-                            : input.tick,
+                serverTick: serverTick,
                 clientTick: input.tick,
                 pos: authoritative.position,
                 vel: authoritative.velocity,
@@ -320,6 +395,9 @@ public class PlayerController : NetworkBehaviour
         transform.position = position;
         cc.enabled = true;
         verticalVelocity = 0f;
+
+        // 텔레포트 직후에는 입력이 몰려 올 수 있으므로 유예를 다시 준다.
+        validator?.ResetGrace(Time.realtimeSinceStartup);
 
         var state = new StatePayload
         {

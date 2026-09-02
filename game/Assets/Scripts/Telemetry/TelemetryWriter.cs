@@ -43,11 +43,11 @@ public static class TJson
             char c = s[i];
             switch (c)
             {
-                case '"':  sb.Append("\\\""); break;
+                case '"': sb.Append("\\\""); break;
                 case '\\': sb.Append("\\\\"); break;
-                case '\n': sb.Append("\\n");  break;
-                case '\r': sb.Append("\\r");  break;
-                case '\t': sb.Append("\\t");  break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
                 default:
                     if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4", Inv));
                     else sb.Append(c);
@@ -127,6 +127,15 @@ public class TelemetryWriter : MonoBehaviour
         else nm.OnServerStarted += BeginMatch;
     }
 
+    /// <summary>
+    /// 위반 창 집계를 진행시킨다. 서버에서만 의미가 있고,
+    /// _running 은 서버에서만 true 이므로 별도 IsServer 검사가 필요 없다.
+    /// </summary>
+    private void FixedUpdate()
+    {
+        if (_running) ViolationLogger.Tick();
+    }
+
     private void OnDestroy()
     {
         var nm = NetworkManager.Singleton;
@@ -173,6 +182,8 @@ public class TelemetryWriter : MonoBehaviour
             return;
         }
 
+        ViolationLogger.Clear();
+
         _running = true;
         _thread = new Thread(FlushLoop) { IsBackground = true, Name = "TelemetryFlush" };
         _thread.Start();
@@ -193,6 +204,10 @@ public class TelemetryWriter : MonoBehaviour
     public void EndMatch()
     {
         if (!_running) return;
+
+        // 아직 열려 있는 위반 창을 모두 내보낸다. 이걸 빼면
+        // 마지막 1초 안에 발생한 위반이 유실된다.
+        ViolationLogger.FlushAll();
 
         var sb = new StringBuilder(128);
         sb.Append("{\"t\":\"match_end\"");
