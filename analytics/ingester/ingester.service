@@ -1,0 +1,26 @@
+[Unit]
+Description=Telemetry Ingester (JSONL -> MariaDB)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=game
+WorkingDirectory=/home/game/gameserver
+
+# DB 접속 정보는 이 파일에서 읽는다. 소스에 하드코딩하지 않는다.
+# /etc/gameserver.env 는 chmod 600, owner root:game
+EnvironmentFile=/etc/gameserver.env
+
+ExecStart=/usr/bin/python3 /home/game/gameserver/ingester/ingester.py \
+    --dir /home/game/gameserver/telemetry \
+    --interval 5
+
+Restart=always
+RestartSec=10
+
+StandardOutput=append:/home/game/gameserver/logs/ingester.log
+StandardError=append:/home/game/gameserver/logs/ingester.log
+
+[Install]
+WantedBy=multi-user.target
