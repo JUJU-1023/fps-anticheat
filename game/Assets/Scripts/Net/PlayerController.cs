@@ -29,11 +29,21 @@ public class PlayerController : NetworkBehaviour
 
     // --- 지면 판정 ---
     // 평평한 지형 1개 전제. 바닥 표면 y = -1, CharacterController Height=2/Center=(0,0,0)
-    // 이므로 캡슐 중심(Transform.y)이 0일 때 지면에 서 있는 상태다.
+    // 이므로 캡슐 중심(Transform.y)이 0일 때 지면에 닿는 것이 이론값이다.
+    //
     // CharacterController.isGrounded는 Move() 호출 결과에 의존해 replay 시 값이
     // 달라질 수 있으므로 쓰지 않는다 (결정론 유지).
     private const float GROUND_Y = 0f;
-    private const float GROUND_EPSILON = 0.02f;
+    private const float GROUND_EPSILON = 0.05f;
+
+    /// <summary>
+    /// 실제로 캐릭터가 정지하는 높이.
+    /// CharacterController는 skinWidth(기본 0.08)만큼 접촉면 위에 뜬 채로 멈춘다.
+    /// 이 값을 계산에 넣지 않으면 캐릭터가 영원히 공중으로 판정되어
+    /// verticalVelocity가 무한히 발산하고 점프가 작동하지 않는다.
+    /// skinWidth는 프리팹 직렬화 값이라 클라/서버가 동일하므로 결정론에 안전하다.
+    /// </summary>
+    private float RestY => GROUND_Y + cc.skinWidth;
 
     // --- 입력 비트 마스크 (InputPayload.buttons) ---
     private const byte BTN_JUMP = 1 << 0;
@@ -50,6 +60,7 @@ public class PlayerController : NetworkBehaviour
     private StatePayload? pendingServerState = null;
 
     private RemotePlayerInterpolator interpolator;
+    private PlayerTelemetry telemetry;
 
     // --- 시뮬레이션 상태 ---
     // 수직 속도는 위치와 별개로 유지되는 상태다. 재조정 시 위치만 되돌리고
@@ -59,7 +70,10 @@ public class PlayerController : NetworkBehaviour
     private float currentYaw = 0f;
     private float currentPitch = 0f;
 
-    // --- RTT 측정 ---
+    // --- RTT 측정 (클라이언트 표시용) ---
+    // 주의: 이 값은 안티치트 판정에 쓰지 않는다. 클라이언트가 측정한 값이므로
+    //       치터가 부풀려 검증 관용 범위를 넓힐 수 있다.
+    //       텔레메트리의 rtt_ms는 PlayerTelemetry가 서버에서 따로 측정한다.
     private CircularBuffer<float> sendTimeBuffer = new(1024);
     private float currentRttMs = 0f;
     public float CurrentRttMs => currentRttMs;
@@ -77,6 +91,7 @@ public class PlayerController : NetworkBehaviour
         if (audioListener) audioListener.enabled = mine;
 
         interpolator = GetComponent<RemotePlayerInterpolator>();
+        telemetry = GetComponent<PlayerTelemetry>();
 
         currentYaw = transform.eulerAngles.y;
     }
@@ -152,8 +167,6 @@ public class PlayerController : NetworkBehaviour
         if (Input.GetKey(KeyCode.LeftControl)) buttons |= BTN_CROUCH;
         if (Input.GetKey(KeyCode.LeftShift)) buttons |= BTN_SPRINT;
 
-        if (buttons != 0) Debug.Log($"[INPUT] buttons={buttons}");
-
         return new InputPayload
         {
             tick = tick,
@@ -212,11 +225,13 @@ public class PlayerController : NetworkBehaviour
 
         cc.Move(motion * dt);
 
-        // 바닥을 뚫고 내려가지 않도록 보정 (평평한 지형 전제)
-        if (transform.position.y < GROUND_Y)
+        // 바닥을 뚫고 내려가지 않도록 보정 (평평한 지형 전제).
+        // 복원 높이는 GROUND_Y가 아니라 RestY다. GROUND_Y로 되돌리면
+        // CharacterController가 다음 틱에 skinWidth만큼 밀어올려 진동한다.
+        if (transform.position.y < RestY)
         {
             Vector3 p = transform.position;
-            p.y = GROUND_Y;
+            p.y = RestY;
             cc.enabled = false;
             transform.position = p;
             cc.enabled = true;
@@ -240,16 +255,35 @@ public class PlayerController : NetworkBehaviour
 
     private bool IsGrounded()
     {
-        return transform.position.y <= GROUND_Y + GROUND_EPSILON;
+        return transform.position.y <= RestY + GROUND_EPSILON;
     }
 
     [ServerRpc]
     private void SubmitInputServerRpc(InputPayload input)
     {
-        // ★ V-MOVE 검증 지점 (W6~W7에서 여기에 속도/텔레포트 체크 추가) ★
+        // ★ V-MOVE 검증 지점 (W6 Day 3~4에서 여기에 삽입) ★
+        //   - 입력 수신율 (토큰 버킷)  : 스피드핵
+        //   - lastProcessedTick 역행   : 리플레이/중복 전송
+        //   - NaN / 입력 크기 검사     : 값 위조
 
         StatePayload authoritative = Simulate(input);
         lastProcessedTick = input.tick;
+
+        // ★ W6-D2 텔레메트리 ★
+        if (telemetry != null)
+        {
+            telemetry.OnServerInput(
+                serverTick: NetworkTickSystem.Instance != null
+                            ? NetworkTickSystem.Instance.CurrentTick
+                            : input.tick,
+                clientTick: input.tick,
+                pos: authoritative.position,
+                vel: authoritative.velocity,
+                yaw: authoritative.yaw,
+                pitch: authoritative.pitch,
+                buttons: input.buttons,
+                grounded: IsGrounded());
+        }
 
         BroadcastStateClientRpc(authoritative);
     }
@@ -259,7 +293,7 @@ public class PlayerController : NetworkBehaviour
     {
         if (IsOwner)
         {
-            // --- RTT 계산 ---
+            // --- RTT 계산 (표시용) ---
             float sentAt = sendTimeBuffer.Get(state.tick);
             if (sentAt > 0f)
             {
