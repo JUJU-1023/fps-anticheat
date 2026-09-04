@@ -13,6 +13,8 @@
 #     Unity가 1초마다 flush하므로 읽는 순간 줄이 잘려 있을 수 있다.
 #   - match_uid / player_uid를 DB의 BIGINT id로 해석하고 캐시한다.
 #
+#  처리 타입: match_start / match_end / move / violation / combat
+#
 #  실행
 #   python3 ingester.py --dir /home/game/gameserver/telemetry
 # =====================================================================
@@ -215,11 +217,21 @@ INSERT INTO violations
 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 """
 
+COMBAT_SQL = """
+INSERT INTO combat_events
+ (match_id, player_id, event_type, weapon_id, shot_index,
+  server_tick, client_tick, server_time,
+  target_dist, rewind_ms, is_headshot,
+  yaw, pitch, expected_recoil_pitch, rtt_ms)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+"""
+
 
 def apply_batch(db, records):
     """레코드 묶음을 하나의 트랜잭션으로 적재한다. 실패하면 예외."""
     moves = []
     viols = []
+    combats = []
 
     with db.conn.cursor() as cur:
         for r in records:
@@ -273,15 +285,37 @@ def apply_batch(db, records):
                     json.dumps(detail, ensure_ascii=False) if detail else None,
                 ))
 
+            elif t == "combat":
+                mid = db.match_id(r["match_uid"])
+                pid = db.player_id(r["player_uid"], r.get("is_bot", False))
+                combats.append((
+                    mid, pid,
+                    r.get("event_type", "FIRE"),
+                    r.get("weapon_id"),
+                    r.get("shot_index"),
+                    r.get("server_tick", 0),
+                    r.get("client_tick"),
+                    parse_ts(r.get("ts")),
+                    r.get("target_dist"),
+                    r.get("rewind_ms"),
+                    r.get("is_headshot"),
+                    r.get("yaw"),
+                    r.get("pitch"),
+                    r.get("expected_recoil_pitch"),
+                    r.get("rtt_ms"),
+                ))
+
             # 미지의 타입은 조용히 건너뛴다. 스키마가 앞서 나가도 깨지지 않는다.
 
         if moves:
             cur.executemany(MOVE_SQL, moves)
         if viols:
             cur.executemany(VIOL_SQL, viols)
+        if combats:
+            cur.executemany(COMBAT_SQL, combats)
 
     db.conn.commit()
-    return len(moves), len(viols)
+    return len(moves), len(viols), len(combats)
 
 
 # ---------------------------------------------------------------------
@@ -333,12 +367,13 @@ def process_file(db, path, name, ckpt, batch_size):
         ckpt.set(name, start + consumed)
         return True
 
-    total_m = total_v = 0
+    total_m = total_v = total_c = 0
     try:
         for i in range(0, len(records), batch_size):
-            m, v = apply_batch(db, records[i:i + batch_size])
+            m, v, c = apply_batch(db, records[i:i + batch_size])
             total_m += m
             total_v += v
+            total_c += c
     except Exception as e:
         try:
             db.conn.rollback()
@@ -348,7 +383,8 @@ def process_file(db, path, name, ckpt, batch_size):
         return False
 
     ckpt.set(name, start + consumed)
-    log("info", f"{name}: move={total_m} violation={total_v} offset={start + consumed}")
+    log("info", f"{name}: move={total_m} violation={total_v} combat={total_c} "
+                f"offset={start + consumed}")
     return True
 
 
