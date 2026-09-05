@@ -11,35 +11,32 @@
 //  발사 신호는 InputPayload.buttons 의 BTN_FIRE 비트로 온다.
 //  별도 RPC 를 만들지 않는 이유는 두 가지다.
 //   1) V-MOVE-01 의 토큰 버킷이 사격에도 그대로 적용된다.
-//      입력이 거부되면 발사도 사라진다.
 //   2) 이동과 사격이 같은 틱 타임라인 위에 놓여 되감기 계산이 단순해진다.
 //
-//  예측하지 않는다
-//   사격은 서버가 판정하고 결과만 통보한다. 이동 시뮬레이션을 건드리지
-//   않으므로 W5 에서 확보한 재조정률 0% 가 보호된다.
-//
 //  ─────────────────────────────────────────────────────────────────
-//  W7 Day 1 변경 (2026-09-04)
+//  W7 Day 1 : 레이어 분리로 랙 보상 복구, V-FIRE-01 토큰 버킷
+//  W7 Day 3 : 조준 오차 / 표적 식별 / V-LOS BlockedHit  ← 이번 변경
 //
-//  (1) 레이캐스트 마스크에서 플레이어 본체를 제외했다.  ★ 중대 ★
-//      기존 마스크는 Default + Hitbox 였고 플레이어 루트도 Default 였다.
-//      PlayerRewind 는 별도 히트박스만 되감고 CharacterController 캡슐은
-//      현재 위치에 그대로 둔다. 그 결과 레이가 되감은 히트박스보다
-//      "현재 위치의 캡슐"에 먼저 맞았고, GetComponentInParent<PlayerRewind>()
-//      가 같은 오브젝트라 non-null 이 되어 정상 명중으로 처리됐다.
-//        → 랙 보상이 무력화되어 현재 위치로 판정
-//        → 캡슐이 머리 히트박스를 감싸므로 헤드샷이 원리상 불가능
-//      W6.5 실측에서 26히트 중 헤드샷 0건이 나온 원인이다.
-//      플레이어 루트를 Player 레이어로 옮기고 마스크에서 뺀다.
-//      히트스캔은 Hitbox 레이어(되감김) 와 World 레이어(벽) 만 본다.
+//  (1) aim_error_deg 를 발사 시점에 계산한다.
+//      20Hz 가시성 루프에서 가져오면 최대 50ms 묵은 값이라 플릭 사격에서
+//      크게 어긋난다. FireHitscan 안에서는 이미 전원을 되감아 놓은
+//      상태라 정확한 값이 추가 비용 없이 나온다.
 //
-//  (2) 반동 인덱스 리셋을 서버 실시간 기준으로 바꿨다.
-//      클라 틱 기준이면 틱을 RecoilResetTicks 이상 점프시켜 매 발을
-//      shotIndex=0 으로 만들 수 있고, expected_recoil_pitch 가 항상 0 이
-//      되어 W8 노리코일 탐지의 기준선이 통째로 사라진다.
+//      ★ 빗나간 FIRE 에도 기록한다.
+//        에임봇의 신호는 "맞췄다"가 아니라 "오차 분포가 비정상적으로
+//        좁다"이다. 명중분만 모으면 W13 에서 이 feature 가 죽는다.
 //
-//  (3) V-FIRE-01 배선. 틱 간격 검사는 게임플레이 게이트로 남기고,
-//      실시간 토큰 버킷을 위반 판정에 쓴다. 근거는 FireRateValidator.cs 참조.
+//  (2) target_uid 를 함께 싣는다. ingester 가 players.id 로 해석한다.
+//      명중이면 피격자, 빗나갔으면 조준선에 가장 가까운 적이다.
+//      빗나간 경우 차폐된 적은 후보에서 뺀다. 벽 뒤 적을 우연히 겨눈 것을
+//      정밀 조준으로 집계하면 오차 분포가 오염된다.
+//
+//  (3) V-LOS-01 / BlockedHit 이중 확인선.
+//      되감은 월드에서 벽이 더 가까우면 히트가 성립하지 않으므로
+//      이 검사는 원리상 발화하지 않는다. 그래도 넣는 이유는
+//      레이어 마스크가 잘못 설정되면 조용히 뚫리기 때문이다.
+//      W7 Day 1 에서 실제로 겪은 종류의 사고다.
+//      정상이면 Day 5 측정에서 0건으로 남고, 그 0 자체가 근거가 된다.
 // =====================================================================
 
 using System.Collections.Generic;
@@ -53,6 +50,15 @@ public class WeaponSystem : NetworkBehaviour
 
     /// <summary>맵 지형·벽이 놓인 레이어. 차폐 판정의 대상이다.</summary>
     private const string WorldLayerName = "Default";
+
+    /// <summary>
+    /// 이 각도 밖의 적은 "겨냥한 대상"으로 보지 않는다.
+    /// 넓히면 아무 방향으로 쏴도 표적이 잡혀 오차 분포가 무의미해진다.
+    /// </summary>
+    private const float AimCandidateConeDeg = 30f;
+
+    /// <summary>차폐 판정 시 벽 표면 근접 허용 오차.</summary>
+    private const float OccludeMargin = 0.05f;
 
     // --- 서버 상태 ---
     private int _lastFireTick = -1000;
@@ -69,10 +75,13 @@ public class WeaponSystem : NetworkBehaviour
     private PlayerRewind _rewind;
     private PlayerTelemetry _telemetry;
 
-    private static readonly StringBuilder _sb = new StringBuilder(384);
+    private static readonly StringBuilder _sb = new StringBuilder(448);
 
-    /// <summary>레이캐스트 대상: 되감긴 히트박스 + 벽. 플레이어 본체는 제외.</summary>
+    /// <summary>히트스캔 대상: 되감긴 히트박스 + 벽. 플레이어 본체는 제외.</summary>
     private int _raycastMask;
+
+    /// <summary>차폐 판정 전용: 벽만.</summary>
+    private int _worldMask;
 
     private string PlayerUid =>
         _telemetry != null ? _telemetry.PlayerUid : "unknown";
@@ -95,16 +104,17 @@ public class WeaponSystem : NetworkBehaviour
     ///
     /// 플레이어 본체(CharacterController)를 넣으면 안 된다.
     /// 본체는 서버의 현재 위치에 있고 히트박스는 과거로 되감겨 있으므로,
-    /// 본체가 마스크에 있으면 되감기가 사실상 무시된다.
+    /// 본체가 마스크에 있으면 되감기가 사실상 무시된다. (W7 Day 1)
     /// </summary>
     private void BuildRaycastMask()
     {
         int world = LayerMask.NameToLayer(WorldLayerName);
         int hitbox = LayerMask.NameToLayer(WeaponConfig.HitboxLayerName);
 
+        _worldMask = 0;
         _raycastMask = 0;
 
-        if (world >= 0) _raycastMask |= (1 << world);
+        if (world >= 0) { _worldMask = 1 << world; _raycastMask |= _worldMask; }
         else Debug.LogError($"[WEAPON] '{WorldLayerName}' 레이어가 없다. 벽 차폐가 작동하지 않는다.");
 
         if (hitbox >= 0) _raycastMask |= (1 << hitbox);
@@ -123,13 +133,11 @@ public class WeaponSystem : NetworkBehaviour
     /// 반동만큼 시야를 밀어 올린다. 서버도 같은 패턴을 알고 있으므로
     /// 이 값이 조작되면 서버 계산과 어긋난다.
     /// </summary>
-    /// <returns>이번 틱에 실제로 발사됐으면 반동(x=yaw, y=pitch), 아니면 zero</returns>
     public Vector2 ClientTryFire(int tick, bool firePressed)
     {
         if (!firePressed) return Vector2.zero;
         if (_health != null && _health.IsDead) return Vector2.zero;
 
-        // 연사를 쉬었으면 반동 인덱스 초기화
         if (tick - _clientLastFireTick > WeaponConfig.RecoilResetTicks)
             _clientShotIndex = 0;
 
@@ -146,10 +154,6 @@ public class WeaponSystem : NetworkBehaviour
     //  서버: 발사 처리
     // -----------------------------------------------------------------
 
-    /// <summary>
-    /// 서버가 입력을 시뮬레이션한 직후 호출한다.
-    /// 발사 조건을 만족하면 되감기 후 히트스캔을 수행한다.
-    /// </summary>
     public void ServerProcessInput(InputPayload input, int serverTick, int rttMs)
     {
         if (!IsServer) return;
@@ -160,13 +164,12 @@ public class WeaponSystem : NetworkBehaviour
 
         // --- 연사 중단 판정 (서버 실시간 기준) ---
         // 클라 틱으로 판정하면 틱을 크게 점프시켜 매 발을 shotIndex=0 으로
-        // 만들 수 있다. 그러면 expected_recoil_pitch 가 항상 0 이 되어
+        // 만들 수 있고, expected_recoil_pitch 가 항상 0 이 되어
         // W8 노리코일 탐지가 비교할 기준선을 잃는다.
         if (now - _lastFireRealtime > WeaponConfig.RecoilResetTicks / VFire.TickRate)
             _shotIndex = 0;
 
         // --- 게임플레이 게이트 (게임시간 기준) ---
-        // 지터로 입력이 몰려 도착해도 게임시간만큼의 발수가 정상적으로 나간다.
         if (input.tick - _lastFireTick < WeaponConfig.FireIntervalTicks) return;
 
         // --- V-FIRE-01 : 실시간 상한 ---
@@ -202,8 +205,7 @@ public class WeaponSystem : NetworkBehaviour
     private void FireHitscan(InputPayload input, int serverTick, int rttMs, int shotIndex)
     {
         // --- 조준 원점과 방향 ---
-        // 클라이언트가 보낸 위치는 쓰지 않는다. 서버의 권위 위치에서
-        // 눈 오프셋을 더해 재구성한다.
+        // 클라이언트가 보낸 위치는 쓰지 않는다.
         Vector3 origin = transform.position + WeaponConfig.EyeOffset;
         Vector3 dir = Quaternion.Euler(input.pitch, input.yaw, 0f) * Vector3.forward;
 
@@ -230,6 +232,7 @@ public class WeaponSystem : NetworkBehaviour
         bool hit = false;
         bool headshot = false;
         float dist = 0f;
+        PlayerRewind victimRewind = null;
         PlayerHealth victim = null;
 
         if (Physics.Raycast(origin, dir, out RaycastHit rh,
@@ -242,14 +245,31 @@ public class WeaponSystem : NetworkBehaviour
             {
                 hit = true;
                 headshot = (rh.collider == vr.HeadCollider);
+                victimRewind = vr;
                 victim = vr.GetComponent<PlayerHealth>();
             }
             // vr == null 이면 벽에 막힌 것이다. 정상 차폐.
-            //
-            // 마스크에 플레이어 본체가 없으므로 여기 걸리는 것은
-            // 되감긴 히트박스이거나 World 지형뿐이다.
-            // V-LOS-01 의 BlockedHit 은 이 경로가 정상 동작하는지를
-            // 이중으로 확인하는 용도로 Day 2 에서 붙인다.
+        }
+
+        // --- 조준 오차와 표적 (되감긴 상태에서 계산해야 한다) ---
+        ResolveAimTarget(origin, dir, rewound, victimRewind,
+                         out string targetUid, out float aimErrorDeg);
+
+        // --- V-LOS-01 / BlockedHit 이중 확인선 ---
+        // 히트가 성립했는데 사이에 벽이 있으면 마스크 설정이 잘못된 것이다.
+        if (hit && victimRewind != null)
+        {
+            float lenHit = dist;
+            if (lenHit > OccludeMargin &&
+                Physics.Raycast(origin, dir, lenHit - OccludeMargin,
+                                _worldMask, QueryTriggerInteraction.Ignore))
+            {
+                hit = false;
+                victim = null;
+                ViolationLogger.Report(
+                    OwnerClientId, PlayerUid, VLos.CODE,
+                    input.tick, VLos.Severity, "BlockedHit", rttMs);
+            }
         }
 
         // --- 복원 ---
@@ -265,12 +285,79 @@ public class WeaponSystem : NetworkBehaviour
         }
 
         EmitCombat(input, serverTick, rttMs, shotIndex,
-                   hit, headshot, killed, dist, victim, rewindSec);
+                   hit, headshot, killed, dist, rewindSec,
+                   targetUid, aimErrorDeg);
 
-        // 사수에게만 히트마커를 통보한다.
         if (hit)
             HitFeedbackClientRpc(headshot, killed,
                 RpcTarget.Single(OwnerClientId, RpcTargetUse.Temp));
+    }
+
+    /// <summary>
+    /// 이 발사가 누구를 겨냥한 것인지와 그 오차각을 정한다.
+    /// 되감기가 걸린 상태에서 호출해야 한다.
+    ///
+    /// 명중이면 피격자가 곧 표적이다.
+    /// 빗나갔으면 조준선에 가장 가까운 적을 표적으로 본다. 다만
+    /// 차폐된 적은 제외한다. 벽 뒤 적을 우연히 겨눈 것을 정밀 조준으로
+    /// 집계하면 aim_error 분포가 오염된다.
+    /// </summary>
+    private void ResolveAimTarget(
+        Vector3 origin, Vector3 dir,
+        List<PlayerRewind> rewound, PlayerRewind victimRewind,
+        out string targetUid, out float aimErrorDeg)
+    {
+        targetUid = null;
+        aimErrorDeg = -1f;
+
+        if (victimRewind != null)
+        {
+            targetUid = UidOf(victimRewind);
+            aimErrorDeg = Vector3.Angle(dir, CenterOf(victimRewind) - origin);
+            return;
+        }
+
+        PlayerRewind best = null;
+        float bestAngle = AimCandidateConeDeg;
+
+        foreach (var pr in rewound)
+        {
+            var ph = pr.GetComponent<PlayerHealth>();
+            if (ph != null && ph.IsDead) continue;
+
+            Vector3 to = CenterOf(pr) - origin;
+            float len = to.magnitude;
+            if (len < 0.01f || len > WeaponConfig.MaxRange) continue;
+
+            float ang = Vector3.Angle(dir, to);
+            if (ang >= bestAngle) continue;
+
+            // 차폐된 적은 후보에서 뺀다.
+            if (Physics.Raycast(origin, to / len, len - OccludeMargin,
+                                _worldMask, QueryTriggerInteraction.Ignore))
+                continue;
+
+            bestAngle = ang;
+            best = pr;
+        }
+
+        if (best != null)
+        {
+            targetUid = UidOf(best);
+            aimErrorDeg = bestAngle;
+        }
+    }
+
+    /// <summary>되감긴 상태의 몸통 중심. 히트박스가 실제로 놓인 위치다.</summary>
+    private static Vector3 CenterOf(PlayerRewind pr)
+        => pr.BodyCollider != null
+         ? pr.BodyCollider.bounds.center
+         : PlayerRewind.BodyCenterFrom(pr.transform.position);
+
+    private static string UidOf(PlayerRewind pr)
+    {
+        var t = pr.GetComponent<PlayerTelemetry>();
+        return t != null ? t.PlayerUid : null;
     }
 
     [Rpc(SendTo.SpecifiedInParams)]
@@ -288,8 +375,8 @@ public class WeaponSystem : NetworkBehaviour
 
     private void EmitCombat(
         InputPayload input, int serverTick, int rttMs, int shotIndex,
-        bool hit, bool headshot, bool killed, float dist,
-        PlayerHealth victim, float rewindSec)
+        bool hit, bool headshot, bool killed, float dist, float rewindSec,
+        string targetUid, float aimErrorDeg)
     {
         var w = TelemetryWriter.Instance;
         if (w == null || !w.IsActive) return;
@@ -315,6 +402,10 @@ public class WeaponSystem : NetworkBehaviour
         _sb.Append(",\"expected_recoil_pitch\":").Append(TJson.F(expected.y));
         _sb.Append(",\"is_headshot\":").Append(headshot ? "true" : "false");
         _sb.Append(",\"target_dist\":").Append(hit ? TJson.F(dist) : "null");
+        _sb.Append(",\"target_uid\":").Append(
+            targetUid != null ? TJson.Str(targetUid) : "null");
+        _sb.Append(",\"aim_error_deg\":").Append(
+            aimErrorDeg >= 0f ? TJson.F(aimErrorDeg) : "null");
         _sb.Append(",\"rewind_ms\":").Append(
             Mathf.RoundToInt(rewindSec * 1000f).ToString(TJson.Inv));
         _sb.Append(",\"rtt_ms\":").Append(rttMs >= 0 ? rttMs.ToString(TJson.Inv) : "null");

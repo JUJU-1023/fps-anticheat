@@ -7,51 +7,49 @@
 //  왜 하나로 묶는가
 //   V-LOS-01(차폐 추적)과 V-TIME-01(SPOT)은 둘 다 "A가 B를 볼 수 있는가"를
 //   묻는다. 검증기마다 Raycast를 따로 쏘면 같은 계산을 두 번 한다.
-//   한 번의 차폐 판정에서 두 신호를 모두 뽑는다.
 //
 //  왜 20Hz 인가
 //   반응시간 해상도 50ms면 충분하다. 인간 반응 하한이 150ms 수준이라
 //   50ms 격자로도 트리거봇(0ms에 가까움)과 구분된다.
-//   60Hz로 돌리면 Raycast 비용만 3배가 되고 얻는 게 없다.
 //
 //  ─────────────────────────────────────────────────────────────────
 //  V-LOS-01 을 왜 "벽 너머 피격"이 아니라 "차폐 추적"으로 보는가
 //
-//   W7 계획 문서의 원안은 벽 너머로 맞은 히트를 잡는 것이었다.
-//   그런데 이 프로젝트의 FireHitscan 은 되감은 월드에서 레이를 쏘고
-//   벽이 더 가까우면 PlayerRewind 가 null 이라 히트가 성립하지 않는다.
-//   벽 너머 피격은 이미 구조적으로 불가능하고, 잡을 대상이 없다.
+//   원안은 벽 너머로 맞은 히트를 잡는 것이었다. 그런데 FireHitscan 은
+//   되감은 월드에서 벽이 더 가까우면 히트를 성립시키지 않는다.
+//   벽 너머 피격은 구조적으로 불가능하고, 잡을 대상이 없다.
+//   (그래도 마스크 오설정에 대비해 WeaponSystem 에 BlockedHit 을 남겨둔다.)
 //
 //   실제 월핵의 관측 가능한 신호는 다른 데 있다.
 //   사람은 벽 뒤 적의 위치를 모르므로 우연히 겨눌 수는 있어도
 //   따라다니지 못한다. 월핵은 따라다닌다.
-//   → "차폐된 적을 좁은 각도 안에서 지속 추적한 시간"을 누적한다.
 //
-//   V-MOVE-01 에서 위치 델타 검사가 발화하지 않아 입력 수신율로
-//   바꾼 것과 같은 종류의 판단이다. 서버 권위 구조가 원래의 공격 경로를
-//   막아버리면, 남은 신호를 다시 찾아야 한다.
+//   V-MOVE-01 에서 위치 델타 검사를 입력 수신율로 바꾼 것과 같은 판단이다.
+//   서버 권위 구조가 원래의 공격 경로를 막으면, 남은 신호를 다시 찾아야 한다.
 //
 //  ─────────────────────────────────────────────────────────────────
-//  시점에 관하여 (중요)
+//  시점에 관하여
 //
-//   관찰자 A 의 눈    : 현재 위치.
-//                       클라이언트 예측이 있으므로 A 는 자기를 현재로 본다.
-//   대상 B 의 중심    : now - (RTT_A/2 + 보간지연) 시점의 되감은 위치.
-//                       A 화면에 실제로 그려져 있는 위치가 그것이다.
+//   관찰자 A 의 눈  : 현재 위치. 클라 예측이 있어 A 는 자기를 현재로 본다.
+//   대상 B 의 중심  : now - (RTT_A/2 + 보간지연) 시점의 되감은 위치.
+//                     A 화면에 실제로 그려져 있는 위치다.
+//   FireHitscan 과 같은 공식이라 두 데이터를 함께 해석할 수 있다.
 //
-//   FireHitscan 의 되감기 공식과 동일하다. 히트 판정과 가시성 판정이
-//   다른 시점을 보면 두 데이터를 함께 해석할 수 없다.
-//
-//   부수 효과로 SPOT 시각이 "A 화면에 뜬 순간"이 되므로,
-//   V-TIME-01 의 반응시간 정규화는 업링크만 빼면 된다 (raw - RTT/2).
-//   현재 위치로 판정했다면 raw - RTT - 보간지연 이어야 한다. 값은 같다.
-//
-//  ─────────────────────────────────────────────────────────────────
 //  판정할 수 없으면 무죄
-//
-//   TryBodyCenterAt 이 false 를 돌려주면 (이력 버퍼가 그 시각까지
-//   닿지 않으면) 그 쌍은 이번 프레임을 통째로 건너뛴다.
+//   TryBodyCenterAt 이 false 면 그 쌍은 이번 프레임을 건너뛴다.
 //   렉 구간에서 정상 플레이어를 잡는 것이 놓치는 것보다 나쁘다.
+//
+//  ─────────────────────────────────────────────────────────────────
+//  W7 Day 3 : V-LOS-01 위반 발화  ← 이번 변경
+//
+//   에피소드당 한 번만 기록한다. 누적이 상한(5초)에 붙어 있는 동안
+//   매 프레임 보고하면 초당 20건이 쌓여 occurrences 가 의미를 잃는다.
+//   TrackClearSec 아래로 내려가야 다시 보고할 수 있게 히스테리시스를 둔다.
+//   그러면 occurrences = "추적 에피소드 횟수" 가 되어 바로 해석된다.
+//
+//   ★ TrackViolationSec 은 아직 실측 근거가 없는 잠정값이다.
+//     Day 5 정상 플레이 30분에서 오탐 분포를 보고 확정한다.
+//     W6 에서 input_count 분포를 보고 버킷 용량 20 을 정한 것과 같은 순서다.
 // =====================================================================
 
 using System.Collections.Generic;
@@ -68,33 +66,42 @@ public static class VLos
 
     /// <summary>
     /// 시야각 절반. 화면 밖의 적은 SPOT 이 성립하지 않는다.
-    /// 실제 카메라 FOV 와 맞춰야 한다. 좁게 잡으면 SPOT 을 놓치고
-    /// 넓게 잡으면 화면에 없던 적에 반응한 것으로 오인한다.
+    /// 실제 카메라 FOV 와 맞춰야 한다.
     /// </summary>
     public const float FovHalfDeg = 55f;
 
     /// <summary>
     /// 이 각도 안에서 차폐된 적을 겨누고 있으면 "추적"으로 센다.
-    /// W7 Day 5 실측 분포를 보고 확정한다. 지금 값은 추정치다.
+    /// 잠정값. Day 5 실측 후 확정.
     /// </summary>
     public const float TrackConeDeg = 5f;
 
     /// <summary>벽 표면 근접 허용 오차. 모서리 스치기 오탐을 줄인다.</summary>
     public const float OccludeMargin = 0.05f;
 
-    /// <summary>
-    /// 시야에서 벗어난 뒤 SPOT 을 해제하기까지의 유예.
-    /// 얇은 기둥 뒤를 지나가는 적에게 SPOT 이 연속 발생하는 것을 막는다.
-    /// </summary>
+    /// <summary>시야에서 벗어난 뒤 SPOT 을 해제하기까지의 유예.</summary>
     public const float ForgetSec = 0.5f;
 
-    /// <summary>추적이 끊겼을 때 누적을 깎는 배율. 사람의 일시적 이탈을 흡수한다.</summary>
+    /// <summary>추적이 끊겼을 때 누적을 깎는 배율. 일시적 이탈을 흡수한다.</summary>
     public const float TrackDecayMul = 2f;
 
-    /// <summary>누적 상한. 무한히 쌓여 복구 불가능해지는 것을 막는다.</summary>
+    /// <summary>누적 상한.</summary>
     public const float TrackCapSec = 5f;
 
+    /// <summary>
+    /// 위반으로 기록할 누적 임계(초). ★ 잠정값 ★
+    /// 사람도 벽 뒤 적의 마지막 위치를 몇 초 겨누고 기다릴 수 있으므로
+    /// Day 5 정상 플레이 실측 없이 이 숫자를 신뢰하면 안 된다.
+    /// </summary>
+    public const float TrackViolationSec = 2.0f;
+
+    /// <summary>이 값 아래로 내려가야 같은 쌍을 다시 보고한다(히스테리시스).</summary>
+    public const float TrackClearSec = 0.5f;
+
     public const string CODE = "V-LOS-01";
+
+    /// <summary>월핵은 이동 위반보다 심각도가 높다.</summary>
+    public const int Severity = 3;
 }
 
 
@@ -104,21 +111,24 @@ public class VisibilitySystem : MonoBehaviour
 
     private class Entry
     {
-        public ulong            clientId;
+        public ulong clientId;
         public PlayerController ctrl;
-        public PlayerRewind     rewind;
-        public PlayerHealth     health;
-        public PlayerTelemetry  telemetry;
+        public PlayerRewind rewind;
+        public PlayerHealth health;
+        public PlayerTelemetry telemetry;
+
+        public string Uid => telemetry != null ? telemetry.PlayerUid : "unknown";
     }
 
     private struct Pair
     {
-        public bool  visible;
+        public bool visible;
         public float lostAt;            // 비가시 전환 시각 (0 = 해당 없음)
         public float spotTime;          // 마지막 SPOT 성립 시각
-        public long  spotId;
+        public long spotId;
         public float occludedTrackSec;  // 차폐 추적 누적
         public float peakTrackSec;      // 세션 내 최대치 (튜닝용)
+        public bool reported;          // 이번 에피소드에서 이미 보고했는가
     }
 
     private readonly List<Entry> _entries = new();
@@ -126,13 +136,14 @@ public class VisibilitySystem : MonoBehaviour
     private readonly List<(ulong, ulong)> _removeKeys = new();
 
     private long _nextSpotId = 1;
-    private int  _tickCounter;
-    private int  _worldMask;
+    private int _tickCounter;
+    private int _worldMask;
 
     // --- 통계 (5초마다 출력) ---
-    private int   _rayCount;
-    private int   _noSampleCount;
-    private int   _spotCount;
+    private int _rayCount;
+    private int _noSampleCount;
+    private int _spotCount;
+    private int _violationCount;
     private float _globalPeakTrack;
     private float _lastStatAt;
 
@@ -146,7 +157,8 @@ public class VisibilitySystem : MonoBehaviour
         if (Instance != null) return;
         var go = new GameObject("VisibilitySystem");
         DontDestroyOnLoad(go);
-        Instance = go.AddComponent<VisibilitySystem>();
+        var vs = go.AddComponent<VisibilitySystem>();
+        if (Instance == null) Instance = vs;
     }
 
     private void Awake()
@@ -173,10 +185,10 @@ public class VisibilitySystem : MonoBehaviour
 
         _entries.Add(new Entry
         {
-            clientId  = ctrl.OwnerClientId,
-            ctrl      = ctrl,
-            rewind    = ctrl.GetComponent<PlayerRewind>(),
-            health    = ctrl.GetComponent<PlayerHealth>(),
+            clientId = ctrl.OwnerClientId,
+            ctrl = ctrl,
+            rewind = ctrl.GetComponent<PlayerRewind>(),
+            health = ctrl.GetComponent<PlayerHealth>(),
             telemetry = ctrl.GetComponent<PlayerTelemetry>(),
         });
 
@@ -209,6 +221,8 @@ public class VisibilitySystem : MonoBehaviour
         _tickCounter = 0;
 
         float now = Time.realtimeSinceStartup;
+        int tick = NetworkTickSystem.Instance != null
+                   ? NetworkTickSystem.Instance.CurrentTick : 0;
 
         for (int i = 0; i < _entries.Count; i++)
         {
@@ -216,7 +230,7 @@ public class VisibilitySystem : MonoBehaviour
             if (a.ctrl == null) continue;
             if (a.health != null && a.health.IsDead) continue;
 
-            Vector3 eye    = a.ctrl.ServerEyePosition;
+            Vector3 eye = a.ctrl.ServerEyePosition;
             Vector3 aimDir = a.ctrl.ServerAimDirection;
 
             // A 화면에 그려져 있는 시점. FireHitscan 과 같은 공식이다.
@@ -243,13 +257,12 @@ public class VisibilitySystem : MonoBehaviour
                 // --- 되감은 몸통 중심 ---
                 if (!b.rewind.TryBodyCenterAt(tRewind, out Vector3 center))
                 {
-                    // 이력이 닿지 않는다. 판정 보류.
-                    _noSampleCount++;
+                    _noSampleCount++;      // 이력이 닿지 않는다. 판정 보류.
                     continue;
                 }
 
-                Vector3 to   = center - eye;
-                float   dist = to.magnitude;
+                Vector3 to = center - eye;
+                float dist = to.magnitude;
                 if (dist < 0.01f) continue;
 
                 _pairs.TryGetValue(key, out Pair st);
@@ -259,18 +272,20 @@ public class VisibilitySystem : MonoBehaviour
                 {
                     UpdateVisibility(ref st, false, now);
                     st.occludedTrackSec = Decay(st.occludedTrackSec, dt);
+                    ClearReportFlag(ref st);
                     _pairs[key] = st;
                     continue;
                 }
 
-                Vector3 dir   = to / dist;
-                float   angle = Vector3.Angle(aimDir, dir);
+                Vector3 dir = to / dist;
+                float angle = Vector3.Angle(aimDir, dir);
 
                 // --- 시야각 컬링 (Raycast 이전에 한다) ---
                 if (angle > VLos.FovHalfDeg)
                 {
                     UpdateVisibility(ref st, false, now);
                     st.occludedTrackSec = Decay(st.occludedTrackSec, dt);
+                    ClearReportFlag(ref st);
                     _pairs[key] = st;
                     continue;
                 }
@@ -288,14 +303,31 @@ public class VisibilitySystem : MonoBehaviour
                 {
                     st.occludedTrackSec =
                         Mathf.Min(VLos.TrackCapSec, st.occludedTrackSec + dt);
+
                     if (st.occludedTrackSec > st.peakTrackSec)
                         st.peakTrackSec = st.occludedTrackSec;
                     if (st.occludedTrackSec > _globalPeakTrack)
                         _globalPeakTrack = st.occludedTrackSec;
+
+                    // 에피소드당 한 번만 보고한다.
+                    if (!st.reported && st.occludedTrackSec >= VLos.TrackViolationSec)
+                    {
+                        st.reported = true;
+                        _violationCount++;
+                        ViolationLogger.Report(
+                            clientId: a.clientId,
+                            playerUid: a.Uid,
+                            code: VLos.CODE,
+                            tick: tick,
+                            severity: VLos.Severity,
+                            detail: "OccludedTracking",
+                            rttMs: rtt);
+                    }
                 }
                 else
                 {
                     st.occludedTrackSec = Decay(st.occludedTrackSec, dt);
+                    ClearReportFlag(ref st);
                 }
 
                 _pairs[key] = st;
@@ -308,6 +340,13 @@ public class VisibilitySystem : MonoBehaviour
     private static float Decay(float v, float dt)
         => Mathf.Max(0f, v - dt * VLos.TrackDecayMul);
 
+    /// <summary>누적이 충분히 내려가면 다음 에피소드를 보고할 수 있게 푼다.</summary>
+    private static void ClearReportFlag(ref Pair st)
+    {
+        if (st.reported && st.occludedTrackSec <= VLos.TrackClearSec)
+            st.reported = false;
+    }
+
     /// <summary>
     /// 가시 상태를 갱신하고 새 SPOT 이면 id 를 발급한다.
     /// 비가시로 바뀔 때는 ForgetSec 만큼 버틴다. 얇은 기둥 뒤를
@@ -319,9 +358,9 @@ public class VisibilitySystem : MonoBehaviour
         {
             if (!st.visible)
             {
-                st.visible  = true;
+                st.visible = true;
                 st.spotTime = now;
-                st.spotId   = _nextSpotId++;
+                st.spotId = _nextSpotId++;
                 _spotCount++;
             }
             st.lostAt = 0f;
@@ -332,7 +371,7 @@ public class VisibilitySystem : MonoBehaviour
             else if (now - st.lostAt >= VLos.ForgetSec)
             {
                 st.visible = false;
-                st.lostAt  = 0f;
+                st.lostAt = 0f;
             }
         }
     }
@@ -340,9 +379,10 @@ public class VisibilitySystem : MonoBehaviour
     private void ResetPair((ulong, ulong) key)
     {
         if (!_pairs.TryGetValue(key, out var st)) return;
-        st.visible          = false;
-        st.lostAt           = 0f;
+        st.visible = false;
+        st.lostAt = 0f;
         st.occludedTrackSec = 0f;
+        st.reported = false;
         _pairs[key] = st;
     }
 
@@ -354,15 +394,17 @@ public class VisibilitySystem : MonoBehaviour
 
         Debug.Log($"[LOS] players={_entries.Count} pairs={_pairs.Count} " +
                   $"rays/s={_rayCount / span:F0} spots={_spotCount} " +
-                  $"noSample={_noSampleCount} peakTrack={_globalPeakTrack:F2}s");
+                  $"noSample={_noSampleCount} viol={_violationCount} " +
+                  $"peakTrack={_globalPeakTrack:F2}s");
 
         _rayCount = 0;
         _noSampleCount = 0;
         _spotCount = 0;
+        _violationCount = 0;
     }
 
     // -----------------------------------------------------------------
-    //  조회 API (Day 3 / Day 4 에서 쓴다)
+    //  조회 API (Day 4 V-TIME 에서 쓴다)
     // -----------------------------------------------------------------
 
     /// <summary>A 가 B 를 보고 있으면 SPOT 시각과 id 를 돌려준다.</summary>
@@ -371,7 +413,7 @@ public class VisibilitySystem : MonoBehaviour
         spotTime = 0f; spotId = 0;
         if (!_pairs.TryGetValue((observer, target), out var st) || !st.visible) return false;
         spotTime = st.spotTime;
-        spotId   = st.spotId;
+        spotId = st.spotId;
         return true;
     }
 

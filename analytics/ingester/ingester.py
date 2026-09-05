@@ -219,11 +219,11 @@ VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 
 COMBAT_SQL = """
 INSERT INTO combat_events
- (match_id, player_id, event_type, weapon_id, shot_index,
+ (match_id, player_id, target_id, event_type, weapon_id, shot_index,
   server_tick, client_tick, server_time,
-  target_dist, rewind_ms, is_headshot,
+  target_dist, aim_error_deg, rewind_ms, is_headshot,
   yaw, pitch, expected_recoil_pitch, rtt_ms)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 """
 
 
@@ -288,19 +288,20 @@ def apply_batch(db, records):
             elif t == "combat":
                 mid = db.match_id(r["match_uid"])
                 pid = db.player_id(r["player_uid"], r.get("is_bot", False))
+
+                # 표적은 이미 등록된 플레이어다. is_bot 은 본인 이벤트에서 정해진다.
+                tuid = r.get("target_uid")
+                tid  = db.player_id(tuid, False) if tuid else None
+
                 combats.append((
-                    mid, pid,
-                    r.get("event_type", "FIRE"),
-                    r.get("weapon_id"),
+                    mid, pid, tid,
+                    r.get("event_type", "FIRE"), r.get("weapon_id"),
                     r.get("shot_index"),
-                    r.get("server_tick", 0),
-                    r.get("client_tick"),
+                    r.get("server_tick", 0), r.get("client_tick"),
                     parse_ts(r.get("ts")),
-                    r.get("target_dist"),
-                    r.get("rewind_ms"),
-                    r.get("is_headshot"),
-                    r.get("yaw"),
-                    r.get("pitch"),
+                    r.get("target_dist"), r.get("aim_error_deg"),
+                    r.get("rewind_ms"), r.get("is_headshot"),
+                    r.get("yaw"), r.get("pitch"),
                     r.get("expected_recoil_pitch"),
                     r.get("rtt_ms"),
                 ))
