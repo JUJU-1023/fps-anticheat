@@ -15,7 +15,7 @@
 //
 //  ─────────────────────────────────────────────────────────────────
 //  W7 Day 1 : 레이어 분리로 랙 보상 복구, V-FIRE-01 토큰 버킷
-//  W7 Day 3 : 조준 오차 / 표적 식별 / V-LOS BlockedHit  ← 이번 변경
+//  W7 Day 3 : 조준 오차 / 표적 식별 / V-LOS BlockedHit
 //
 //  (1) aim_error_deg 를 발사 시점에 계산한다.
 //      20Hz 가시성 루프에서 가져오면 최대 50ms 묵은 값이라 플릭 사격에서
@@ -31,7 +31,13 @@
 //      빗나간 경우 차폐된 적은 후보에서 뺀다. 벽 뒤 적을 우연히 겨눈 것을
 //      정밀 조준으로 집계하면 오차 분포가 오염된다.
 //
-//  (3) V-LOS-01 / BlockedHit 이중 확인선.
+//  (3) target_dist 를 빗나간 사격에도 기록한다.
+//      aim_error_deg 는 각도라 거리 없이는 실제 빗나간 폭을 알 수 없다.
+//      1도는 5m 에서 8.7cm, 50m 에서 87cm 다. 에임봇 판별에는
+//      각도보다 미터 단위 오차(aim_error x dist)가 더 직접적이다.
+//      ResolveAimTarget 이 이미 거리를 계산하므로 버리지 않고 내보낸다.
+//
+//  (4) V-LOS-01 / BlockedHit 이중 확인선.
 //      되감은 월드에서 벽이 더 가까우면 히트가 성립하지 않으므로
 //      이 검사는 원리상 발화하지 않는다. 그래도 넣는 이유는
 //      레이어 마스크가 잘못 설정되면 조용히 뚫리기 때문이다.
@@ -231,7 +237,7 @@ public class WeaponSystem : NetworkBehaviour
 
         bool hit = false;
         bool headshot = false;
-        float dist = 0f;
+        float hitDist = 0f;
         PlayerRewind victimRewind = null;
         PlayerHealth victim = null;
 
@@ -239,7 +245,7 @@ public class WeaponSystem : NetworkBehaviour
                             WeaponConfig.MaxRange, _raycastMask,
                             QueryTriggerInteraction.Ignore))
         {
-            dist = rh.distance;
+            hitDist = rh.distance;
             var vr = rh.collider.GetComponentInParent<PlayerRewind>();
             if (vr != null)
             {
@@ -253,15 +259,14 @@ public class WeaponSystem : NetworkBehaviour
 
         // --- 조준 오차와 표적 (되감긴 상태에서 계산해야 한다) ---
         ResolveAimTarget(origin, dir, rewound, victimRewind,
-                         out string targetUid, out float aimErrorDeg);
+                         out string targetUid, out float aimErrorDeg, out float aimDist);
 
         // --- V-LOS-01 / BlockedHit 이중 확인선 ---
         // 히트가 성립했는데 사이에 벽이 있으면 마스크 설정이 잘못된 것이다.
         if (hit && victimRewind != null)
         {
-            float lenHit = dist;
-            if (lenHit > OccludeMargin &&
-                Physics.Raycast(origin, dir, lenHit - OccludeMargin,
+            if (hitDist > OccludeMargin &&
+                Physics.Raycast(origin, dir, hitDist - OccludeMargin,
                                 _worldMask, QueryTriggerInteraction.Ignore))
             {
                 hit = false;
@@ -284,8 +289,12 @@ public class WeaponSystem : NetworkBehaviour
             killed = victim.ApplyDamage(dmg, _health);
         }
 
+        // 명중이면 실제 피탄 거리, 빗나갔으면 표적까지의 거리.
+        // 둘 다 없으면 -1 로 두어 NULL 로 나간다.
+        float reportDist = hit ? hitDist : aimDist;
+
         EmitCombat(input, serverTick, rttMs, shotIndex,
-                   hit, headshot, killed, dist, rewindSec,
+                   hit, headshot, killed, reportDist, rewindSec,
                    targetUid, aimErrorDeg);
 
         if (hit)
@@ -294,7 +303,7 @@ public class WeaponSystem : NetworkBehaviour
     }
 
     /// <summary>
-    /// 이 발사가 누구를 겨냥한 것인지와 그 오차각을 정한다.
+    /// 이 발사가 누구를 겨냥한 것인지, 그 오차각과 거리를 정한다.
     /// 되감기가 걸린 상태에서 호출해야 한다.
     ///
     /// 명중이면 피격자가 곧 표적이다.
@@ -305,20 +314,24 @@ public class WeaponSystem : NetworkBehaviour
     private void ResolveAimTarget(
         Vector3 origin, Vector3 dir,
         List<PlayerRewind> rewound, PlayerRewind victimRewind,
-        out string targetUid, out float aimErrorDeg)
+        out string targetUid, out float aimErrorDeg, out float targetDist)
     {
         targetUid = null;
         aimErrorDeg = -1f;
+        targetDist = -1f;
 
         if (victimRewind != null)
         {
+            Vector3 to = CenterOf(victimRewind) - origin;
             targetUid = UidOf(victimRewind);
-            aimErrorDeg = Vector3.Angle(dir, CenterOf(victimRewind) - origin);
+            aimErrorDeg = Vector3.Angle(dir, to);
+            targetDist = to.magnitude;
             return;
         }
 
         PlayerRewind best = null;
         float bestAngle = AimCandidateConeDeg;
+        float bestLen = -1f;
 
         foreach (var pr in rewound)
         {
@@ -338,6 +351,7 @@ public class WeaponSystem : NetworkBehaviour
                 continue;
 
             bestAngle = ang;
+            bestLen = len;
             best = pr;
         }
 
@@ -345,6 +359,7 @@ public class WeaponSystem : NetworkBehaviour
         {
             targetUid = UidOf(best);
             aimErrorDeg = bestAngle;
+            targetDist = bestLen;
         }
     }
 
@@ -401,7 +416,7 @@ public class WeaponSystem : NetworkBehaviour
         _sb.Append(",\"pitch\":").Append(TJson.F(input.pitch));
         _sb.Append(",\"expected_recoil_pitch\":").Append(TJson.F(expected.y));
         _sb.Append(",\"is_headshot\":").Append(headshot ? "true" : "false");
-        _sb.Append(",\"target_dist\":").Append(hit ? TJson.F(dist) : "null");
+        _sb.Append(",\"target_dist\":").Append(dist >= 0f ? TJson.F(dist) : "null");
         _sb.Append(",\"target_uid\":").Append(
             targetUid != null ? TJson.Str(targetUid) : "null");
         _sb.Append(",\"aim_error_deg\":").Append(
