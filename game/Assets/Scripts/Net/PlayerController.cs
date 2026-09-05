@@ -1,4 +1,23 @@
-﻿using Unity.Netcode;
+﻿// =====================================================================
+//  PlayerController.cs
+//  경로: game/Assets/Scripts/Net/PlayerController.cs
+//
+//  W7 Day 2 변경 (2026-09-04)
+//
+//  (1) 서버 조준각 보관.  ★
+//      Simulate() 는 transform.rotation 에 yaw 만 반영하고 pitch 는
+//      StatePayload 로 내보내고 끝이라, 서버에 pitch 가 남지 않았다.
+//      20Hz 가시성 루프가 조준 방향을 만들려면 둘 다 필요하다.
+//      → serverAimYaw / serverAimPitch 를 SubmitInputServerRpc 에서 갱신
+//
+//  (2) VisibilitySystem 등록/해제.
+//
+//  (3) V-MOVE 위반 기록에 서버 측정 RTT 를 넣는다.
+//      기존에는 -1 을 넣어 violations.rtt_ms 가 전부 null 이었다.
+//      위반이 회선 상태와 상관있는지 나중에 볼 수 없다.
+// =====================================================================
+
+using Unity.Netcode;
 using UnityEngine;
 
 public class PlayerController : NetworkBehaviour
@@ -56,6 +75,9 @@ public class PlayerController : NetworkBehaviour
 
     private int lastProcessedTick = -1;
 
+    /// <summary>서버가 마지막으로 처리한 클라이언트 틱. 검증기가 기준으로 쓴다.</summary>
+    public int LastProcessedTick => lastProcessedTick;
+
     // 서버에서 온 미처리 상태 (RPC 콜백에서 담고 FixedUpdate에서 소비)
     private StatePayload? pendingServerState = null;
 
@@ -75,6 +97,28 @@ public class PlayerController : NetworkBehaviour
 
     private float currentYaw = 0f;
     private float currentPitch = 0f;
+
+    // -----------------------------------------------------------------
+    //  서버 조준각 (W7 Day 2)
+    // -----------------------------------------------------------------
+    //
+    //  Simulate() 는 transform.rotation 에 yaw 만 반영한다. pitch 는
+    //  StatePayload 로 나가고 서버에는 남지 않아, 가시성 루프가 조준
+    //  방향을 재구성할 수 없었다. 마지막으로 "검증을 통과해 처리된"
+    //  입력의 각도만 보관한다. 거부된 입력은 반영하지 않는다.
+
+    private float serverAimYaw = 0f;
+    private float serverAimPitch = 0f;
+
+    public float ServerAimYaw => serverAimYaw;
+    public float ServerAimPitch => serverAimPitch;
+
+    /// <summary>서버가 아는 조준 방향. FireHitscan 의 dir 계산과 동일하다.</summary>
+    public Vector3 ServerAimDirection =>
+        Quaternion.Euler(serverAimPitch, serverAimYaw, 0f) * Vector3.forward;
+
+    /// <summary>서버 권위 눈 위치. 클라이언트 예측이 있으므로 되감지 않는다.</summary>
+    public Vector3 ServerEyePosition => transform.position + WeaponConfig.EyeOffset;
 
     // --- RTT 측정 (클라이언트 표시용) ---
     // 주의: 이 값은 안티치트 판정에 쓰지 않는다. 클라이언트가 측정한 값이므로
@@ -102,16 +146,30 @@ public class PlayerController : NetworkBehaviour
         weapon = GetComponent<WeaponSystem>();
         health = GetComponent<PlayerHealth>();
 
-        if (IsServer)
-            validator = new MovementValidator(Time.realtimeSinceStartup);
-
         currentYaw = transform.eulerAngles.y;
 
-        if (IsOwner)                                        // ← 추가
+        if (IsServer)
+        {
+            validator = new MovementValidator(Time.realtimeSinceStartup);
+
+            serverAimYaw = transform.eulerAngles.y;
+            serverAimPitch = 0f;
+
+            VisibilitySystem.EnsureExists();
+            VisibilitySystem.Instance.Register(this);
+        }
+
+        if (IsOwner)
         {
             Cursor.lockState = CursorLockMode.Locked;
             Cursor.visible = false;
         }
+    }
+
+    public override void OnNetworkDespawn()
+    {
+        if (IsServer && VisibilitySystem.Instance != null)
+            VisibilitySystem.Instance.Unregister(this);
     }
 
     void FixedUpdate()
@@ -229,7 +287,7 @@ public class PlayerController : NetworkBehaviour
             return;                    // 이 클릭은 발사로 치지 않는다
         }
 
-        if (health != null && health.IsDead) return;   // ← 추가. 사망 카메라와 충돌 방지
+        if (health != null && health.IsDead) return;   // 사망 카메라와 충돌 방지
 
         currentYaw += Input.GetAxisRaw("Mouse X") * mouseSensitivity;
         currentYaw = Mathf.Repeat(currentYaw, 360f);
@@ -269,8 +327,6 @@ public class PlayerController : NetworkBehaviour
             pitch = currentPitch,
             buttons = buttons
         };
-
-
     }
 
     /// <summary>
@@ -361,6 +417,8 @@ public class PlayerController : NetworkBehaviour
                        ? NetworkTickSystem.Instance.CurrentTick
                        : input.tick;
 
+        int rttMs = ServerRttMs();
+
         // =============================================================
         //  ★ V-MOVE-01 (W6-D3) ★
         //
@@ -385,13 +443,18 @@ public class PlayerController : NetworkBehaviour
                     tick: serverTick,
                     severity: 2,
                     detail: reason.ToString(),
-                    rttMs: -1);
+                    rttMs: rttMs);
                 return;
             }
         }
 
         StatePayload authoritative = Simulate(input);
         lastProcessedTick = input.tick;
+
+        // ★ W7-D2 ★ 검증을 통과한 입력의 조준각만 서버 상태로 남긴다.
+        // 거부된 입력을 반영하면 치터가 조준 방향을 조작할 수 있다.
+        serverAimYaw = input.yaw;
+        serverAimPitch = input.pitch;
 
         // ★ W6-D2 텔레메트리 ★
         if (telemetry != null)
@@ -408,12 +471,13 @@ public class PlayerController : NetworkBehaviour
         }
 
         BroadcastStateClientRpc(authoritative);
+
         // ★ W6.5 사격 ★
-        weapon?.ServerProcessInput(input, serverTick, ServerRttMs());
+        weapon?.ServerProcessInput(input, serverTick, rttMs);
     }
 
     /// <summary>서버 측정 RTT. 클라이언트 보고값을 쓰지 않는다.</summary>
-    private int ServerRttMs()
+    public int ServerRttMs()
     {
         var nm = NetworkManager.Singleton;
         if (nm == null || nm.NetworkConfig?.NetworkTransport == null) return -1;
@@ -457,6 +521,7 @@ public class PlayerController : NetworkBehaviour
 
         // 텔레포트 직후에는 입력이 몰려 올 수 있으므로 유예를 다시 준다.
         validator?.ResetGrace(Time.realtimeSinceStartup);
+        weapon?.ServerOnRespawn();
 
         var state = new StatePayload
         {
