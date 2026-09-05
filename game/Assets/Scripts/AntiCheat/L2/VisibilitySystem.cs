@@ -9,8 +9,9 @@
 //   묻는다. 검증기마다 Raycast를 따로 쏘면 같은 계산을 두 번 한다.
 //
 //  왜 20Hz 인가
-//   반응시간 해상도 50ms면 충분하다. 인간 반응 하한이 150ms 수준이라
-//   50ms 격자로도 트리거봇(0ms에 가까움)과 구분된다.
+//   반응시간 해상도 50ms 면 트리거봇(0ms 근처)과 사람(150ms 이상)을
+//   구분하기에 충분하다. 다만 이 50ms 는 측정 편향이 되므로
+//   ReactionTimeValidator 가 판정에서 보정한다.
 //
 //  ─────────────────────────────────────────────────────────────────
 //  V-LOS-01 을 왜 "벽 너머 피격"이 아니라 "차폐 추적"으로 보는가
@@ -18,14 +19,11 @@
 //   원안은 벽 너머로 맞은 히트를 잡는 것이었다. 그런데 FireHitscan 은
 //   되감은 월드에서 벽이 더 가까우면 히트를 성립시키지 않는다.
 //   벽 너머 피격은 구조적으로 불가능하고, 잡을 대상이 없다.
-//   (그래도 마스크 오설정에 대비해 WeaponSystem 에 BlockedHit 을 남겨둔다.)
+//   (마스크 오설정에 대비해 WeaponSystem 에 BlockedHit 을 남겨둔다.)
 //
-//   실제 월핵의 관측 가능한 신호는 다른 데 있다.
 //   사람은 벽 뒤 적의 위치를 모르므로 우연히 겨눌 수는 있어도
 //   따라다니지 못한다. 월핵은 따라다닌다.
-//
 //   V-MOVE-01 에서 위치 델타 검사를 입력 수신율로 바꾼 것과 같은 판단이다.
-//   서버 권위 구조가 원래의 공격 경로를 막으면, 남은 신호를 다시 찾아야 한다.
 //
 //  ─────────────────────────────────────────────────────────────────
 //  시점에 관하여
@@ -34,25 +32,26 @@
 //   대상 B 의 중심  : now - (RTT_A/2 + 보간지연) 시점의 되감은 위치.
 //                     A 화면에 실제로 그려져 있는 위치다.
 //   FireHitscan 과 같은 공식이라 두 데이터를 함께 해석할 수 있다.
+//   덕분에 SPOT 시각이 곧 "A 화면에 뜬 순간"이 되고,
+//   V-TIME 정규화는 업링크(RTT/2)만 빼면 된다.
 //
 //  판정할 수 없으면 무죄
 //   TryBodyCenterAt 이 false 면 그 쌍은 이번 프레임을 건너뛴다.
-//   렉 구간에서 정상 플레이어를 잡는 것이 놓치는 것보다 나쁘다.
 //
 //  ─────────────────────────────────────────────────────────────────
-//  W7 Day 3 : V-LOS-01 위반 발화  ← 이번 변경
+//  W7 Day 3 : V-LOS-01 위반 발화
+//  W7 Day 4 : SPOT 텔레메트리 방출  ← 이번 변경
 //
-//   에피소드당 한 번만 기록한다. 누적이 상한(5초)에 붙어 있는 동안
-//   매 프레임 보고하면 초당 20건이 쌓여 occurrences 가 의미를 잃는다.
-//   TrackClearSec 아래로 내려가야 다시 보고할 수 있게 히스테리시스를 둔다.
-//   그러면 occurrences = "추적 에피소드 횟수" 가 되어 바로 해석된다.
-//
-//   ★ TrackViolationSec 은 아직 실측 근거가 없는 잠정값이다.
-//     Day 5 정상 플레이 30분에서 오탐 분포를 보고 확정한다.
-//     W6 에서 input_count 분포를 보고 버킷 용량 20 을 정한 것과 같은 순서다.
+//   SPOT 을 combat_events 에 event_type='SPOT' 으로 남긴다.
+//   위반만 기록하면 정상 플레이어의 반응시간 분포가 없어서
+//   Day 5 에서 임계값을 실측으로 정할 수 없고, W13 feature 도 못 만든다.
+//   반응시간은 SQL 에서 유도한다.
+//     fire.server_time - spot.server_time - fire.rtt_ms/2
+//   전환 시에만 발생하므로 볼륨은 작다.
 // =====================================================================
 
 using System.Collections.Generic;
+using System.Text;
 using Unity.Netcode;
 using UnityEngine;
 
@@ -134,6 +133,8 @@ public class VisibilitySystem : MonoBehaviour
     private readonly List<Entry> _entries = new();
     private readonly Dictionary<(ulong, ulong), Pair> _pairs = new();
     private readonly List<(ulong, ulong)> _removeKeys = new();
+
+    private static readonly StringBuilder _sb = new StringBuilder(320);
 
     private long _nextSpotId = 1;
     private int _tickCounter;
@@ -296,7 +297,10 @@ public class VisibilitySystem : MonoBehaviour
                     _worldMask, QueryTriggerInteraction.Ignore);
                 _rayCount++;
 
-                UpdateVisibility(ref st, !blocked, now);
+                // --- SPOT (V-TIME-01) ---
+                if (UpdateVisibility(ref st, !blocked, now))
+                    EmitSpot(a, b, st.spotId, tick, dist, angle, rtt,
+                             Mathf.RoundToInt(rewindSec * 1000f));
 
                 // --- 차폐 추적 누적 (V-LOS-01) ---
                 if (blocked && angle < VLos.TrackConeDeg)
@@ -352,11 +356,13 @@ public class VisibilitySystem : MonoBehaviour
     /// 비가시로 바뀔 때는 ForgetSec 만큼 버틴다. 얇은 기둥 뒤를
     /// 스쳐 지나가는 적에게 SPOT 이 연속 발생하는 것을 막는다.
     /// </summary>
-    private void UpdateVisibility(ref Pair st, bool visible, float now)
+    /// <returns>이번 호출에서 새 SPOT 이 성립했으면 true</returns>
+    private bool UpdateVisibility(ref Pair st, bool visible, float now)
     {
         if (visible)
         {
-            if (!st.visible)
+            bool isNew = !st.visible;
+            if (isNew)
             {
                 st.visible = true;
                 st.spotTime = now;
@@ -364,8 +370,10 @@ public class VisibilitySystem : MonoBehaviour
                 _spotCount++;
             }
             st.lostAt = 0f;
+            return isNew;
         }
-        else if (st.visible)
+
+        if (st.visible)
         {
             if (st.lostAt <= 0f) st.lostAt = now;
             else if (now - st.lostAt >= VLos.ForgetSec)
@@ -374,6 +382,7 @@ public class VisibilitySystem : MonoBehaviour
                 st.lostAt = 0f;
             }
         }
+        return false;
     }
 
     private void ResetPair((ulong, ulong) key)
@@ -384,6 +393,42 @@ public class VisibilitySystem : MonoBehaviour
         st.occludedTrackSec = 0f;
         st.reported = false;
         _pairs[key] = st;
+    }
+
+    // -----------------------------------------------------------------
+    //  SPOT 텔레메트리
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// SPOT 한 건을 combat_events 로 내보낸다.
+    /// 반응시간은 이 행과 뒤따르는 FIRE 행을 spot_event_id 로 이어
+    /// SQL 에서 유도한다. 서버가 미리 계산해 두지 않는 이유는
+    /// 정상 플레이어의 분포 자체가 Day 5 임계 결정과 W13 feature 의
+    /// 원재료이기 때문이다.
+    /// </summary>
+    private void EmitSpot(Entry a, Entry b, long spotId, int serverTick,
+                          float dist, float angleDeg, int rttMs, int rewindMs)
+    {
+        var w = TelemetryWriter.Instance;
+        if (w == null || !w.IsActive) return;
+
+        _sb.Clear();
+        _sb.Append("{\"t\":\"combat\"");
+        _sb.Append(",\"match_uid\":").Append(TJson.Str(w.MatchUid));
+        _sb.Append(",\"player_uid\":").Append(TJson.Str(a.Uid));
+        _sb.Append(",\"target_uid\":").Append(TJson.Str(b.Uid));
+        _sb.Append(",\"event_type\":\"SPOT\"");
+        _sb.Append(",\"spot_event_id\":").Append(spotId.ToString(TJson.Inv));
+        _sb.Append(",\"server_tick\":").Append(serverTick.ToString(TJson.Inv));
+        _sb.Append(",\"ts\":").Append(TJson.Str(TJson.Now()));
+        _sb.Append(",\"target_dist\":").Append(TJson.F(dist));
+        _sb.Append(",\"aim_error_deg\":").Append(TJson.F(angleDeg));
+        _sb.Append(",\"rewind_ms\":").Append(rewindMs.ToString(TJson.Inv));
+        _sb.Append(",\"is_headshot\":false");
+        _sb.Append(",\"rtt_ms\":").Append(rttMs >= 0 ? rttMs.ToString(TJson.Inv) : "null");
+        _sb.Append('}');
+
+        w.Write(_sb.ToString());
     }
 
     private void EmitStats(float now)
@@ -404,7 +449,7 @@ public class VisibilitySystem : MonoBehaviour
     }
 
     // -----------------------------------------------------------------
-    //  조회 API (Day 4 V-TIME 에서 쓴다)
+    //  조회 API
     // -----------------------------------------------------------------
 
     /// <summary>A 가 B 를 보고 있으면 SPOT 시각과 id 를 돌려준다.</summary>

@@ -222,8 +222,8 @@ INSERT INTO combat_events
  (match_id, player_id, target_id, event_type, weapon_id, shot_index,
   server_tick, client_tick, server_time,
   target_dist, aim_error_deg, rewind_ms, is_headshot,
-  yaw, pitch, expected_recoil_pitch, rtt_ms)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+  yaw, pitch, expected_recoil_pitch, rtt_ms, spot_event_id)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 """
 
 
@@ -304,6 +304,7 @@ def apply_batch(db, records):
                     r.get("yaw"), r.get("pitch"),
                     r.get("expected_recoil_pitch"),
                     r.get("rtt_ms"),
+                    r.get("spot_event_id"),
                 ))
 
             # 미지의 타입은 조용히 건너뛴다. 스키마가 앞서 나가도 깨지지 않는다.

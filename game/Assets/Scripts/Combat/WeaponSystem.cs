@@ -16,33 +16,32 @@
 //  ─────────────────────────────────────────────────────────────────
 //  W7 Day 1 : 레이어 분리로 랙 보상 복구, V-FIRE-01 토큰 버킷
 //  W7 Day 3 : 조준 오차 / 표적 식별 / V-LOS BlockedHit
+//  W7 Day 4 : spot_event_id 기록, V-TIME-01 배선  ← 이번 변경
 //
-//  (1) aim_error_deg 를 발사 시점에 계산한다.
-//      20Hz 가시성 루프에서 가져오면 최대 50ms 묵은 값이라 플릭 사격에서
-//      크게 어긋난다. FireHitscan 안에서는 이미 전원을 되감아 놓은
-//      상태라 정확한 값이 추가 비용 없이 나온다.
+//  aim_error_deg 를 발사 시점에 계산하는 이유
+//   20Hz 가시성 루프에서 가져오면 최대 50ms 묵은 값이라 플릭 사격에서
+//   크게 어긋난다. FireHitscan 안에서는 이미 전원을 되감아 놓은
+//   상태라 정확한 값이 추가 비용 없이 나온다.
 //
-//      ★ 빗나간 FIRE 에도 기록한다.
-//        에임봇의 신호는 "맞췄다"가 아니라 "오차 분포가 비정상적으로
-//        좁다"이다. 명중분만 모으면 W13 에서 이 feature 가 죽는다.
+//   ★ 빗나간 FIRE 에도 기록한다.
+//     에임봇의 신호는 "맞췄다"가 아니라 "오차 분포가 비정상적으로
+//     좁다"이다. 명중분만 모으면 W13 에서 이 feature 가 죽는다.
 //
-//  (2) target_uid 를 함께 싣는다. ingester 가 players.id 로 해석한다.
-//      명중이면 피격자, 빗나갔으면 조준선에 가장 가까운 적이다.
-//      빗나간 경우 차폐된 적은 후보에서 뺀다. 벽 뒤 적을 우연히 겨눈 것을
-//      정밀 조준으로 집계하면 오차 분포가 오염된다.
+//  target_dist 를 빗나간 사격에도 채우는 이유
+//   aim_error_deg 는 각도라 거리 없이는 실제 빗나간 폭을 알 수 없다.
+//   1도는 5m 에서 8.7cm, 50m 에서 87cm 다.
 //
-//  (3) target_dist 를 빗나간 사격에도 기록한다.
-//      aim_error_deg 는 각도라 거리 없이는 실제 빗나간 폭을 알 수 없다.
-//      1도는 5m 에서 8.7cm, 50m 에서 87cm 다. 에임봇 판별에는
-//      각도보다 미터 단위 오차(aim_error x dist)가 더 직접적이다.
-//      ResolveAimTarget 이 이미 거리를 계산하므로 버리지 않고 내보낸다.
+//  spot_event_id
+//   이 발사가 어느 SPOT 에서 이어진 것인지 이어 준다. 반응시간은
+//   SQL 에서 유도한다: fire.server_time - spot.server_time - rtt_ms/2
+//   연사 후속탄에도 같은 id 가 붙으므로 분석 시 SPOT 당 최초 발사만
+//   취해야 한다. 서버 판정(V-TIME-01)은 이미 최초 1발만 잰다.
 //
-//  (4) V-LOS-01 / BlockedHit 이중 확인선.
-//      되감은 월드에서 벽이 더 가까우면 히트가 성립하지 않으므로
-//      이 검사는 원리상 발화하지 않는다. 그래도 넣는 이유는
-//      레이어 마스크가 잘못 설정되면 조용히 뚫리기 때문이다.
-//      W7 Day 1 에서 실제로 겪은 종류의 사고다.
-//      정상이면 Day 5 측정에서 0건으로 남고, 그 0 자체가 근거가 된다.
+//  V-LOS-01 / BlockedHit
+//   되감은 월드에서 벽이 더 가까우면 히트가 성립하지 않으므로
+//   원리상 발화하지 않는다. 그래도 넣는 이유는 레이어 마스크가
+//   잘못 설정되면 조용히 뚫리기 때문이다. W7 Day 1 에서 실제로 겪었다.
+//   정상이면 0건으로 남고, 그 0 자체가 근거가 된다.
 // =====================================================================
 
 using System.Collections.Generic;
@@ -72,6 +71,7 @@ public class WeaponSystem : NetworkBehaviour
     private int _shotIndex = 0;      // 연사 중 몇 번째 발인지 (반동 인덱스)
 
     private FireRateValidator _fireValidator;
+    private ReactionTimeValidator _reaction;
 
     // --- 클라 상태 (반동 체감용) ---
     private int _clientLastFireTick = -1000;
@@ -81,7 +81,7 @@ public class WeaponSystem : NetworkBehaviour
     private PlayerRewind _rewind;
     private PlayerTelemetry _telemetry;
 
-    private static readonly StringBuilder _sb = new StringBuilder(448);
+    private static readonly StringBuilder _sb = new StringBuilder(480);
 
     /// <summary>히트스캔 대상: 되감긴 히트박스 + 벽. 플레이어 본체는 제외.</summary>
     private int _raycastMask;
@@ -101,8 +101,11 @@ public class WeaponSystem : NetworkBehaviour
         BuildRaycastMask();
 
         if (IsServer)
+        {
             _fireValidator = new FireRateValidator(
                 Time.realtimeSinceStartup, WeaponConfig.FireIntervalTicks);
+            _reaction = new ReactionTimeValidator();
+        }
     }
 
     /// <summary>
@@ -197,12 +200,13 @@ public class WeaponSystem : NetworkBehaviour
         FireHitscan(input, serverTick, rttMs, shotIndex);
     }
 
-    /// <summary>리스폰 시 호출. 유예를 다시 주고 반동 인덱스를 초기화한다.</summary>
+    /// <summary>리스폰 시 호출. 유예를 다시 주고 상태를 초기화한다.</summary>
     public void ServerOnRespawn()
     {
         if (!IsServer) return;
         float now = Time.realtimeSinceStartup;
         _fireValidator?.ResetGrace(now);
+        _reaction?.Reset();
         _shotIndex = 0;
         _lastFireTick = -1000;
         _lastFireRealtime = -999f;
@@ -221,7 +225,8 @@ public class WeaponSystem : NetworkBehaviour
             (rttMs > 0 ? rttMs / 2000f : 0f) + WeaponConfig.InterpolationDelaySec,
             0f, WeaponConfig.MaxRewindSec);
 
-        float targetTime = Time.realtimeSinceStartup - rewindSec;
+        float nowRt = Time.realtimeSinceStartup;
+        float targetTime = nowRt - rewindSec;
 
         // --- 되감기 ---
         var rewound = new List<PlayerRewind>();
@@ -258,11 +263,11 @@ public class WeaponSystem : NetworkBehaviour
         }
 
         // --- 조준 오차와 표적 (되감긴 상태에서 계산해야 한다) ---
-        ResolveAimTarget(origin, dir, rewound, victimRewind,
-                         out string targetUid, out float aimErrorDeg, out float aimDist);
+        PlayerRewind aimTarget = ResolveAimTarget(
+            origin, dir, rewound, victimRewind,
+            out float aimErrorDeg, out float aimDist);
 
         // --- V-LOS-01 / BlockedHit 이중 확인선 ---
-        // 히트가 성립했는데 사이에 벽이 있으면 마스크 설정이 잘못된 것이다.
         if (hit && victimRewind != null)
         {
             if (hitDist > OccludeMargin &&
@@ -289,17 +294,58 @@ public class WeaponSystem : NetworkBehaviour
             killed = victim.ApplyDamage(dmg, _health);
         }
 
+        // --- V-TIME-01 : 반응시간 ---
+        long spotId = ResolveSpotAndCheckReaction(aimTarget, nowRt, rttMs, input.tick);
+
         // 명중이면 실제 피탄 거리, 빗나갔으면 표적까지의 거리.
-        // 둘 다 없으면 -1 로 두어 NULL 로 나간다.
         float reportDist = hit ? hitDist : aimDist;
 
         EmitCombat(input, serverTick, rttMs, shotIndex,
                    hit, headshot, killed, reportDist, rewindSec,
-                   targetUid, aimErrorDeg);
+                   aimTarget != null ? UidOf(aimTarget) : null,
+                   aimErrorDeg, spotId);
 
         if (hit)
             HitFeedbackClientRpc(headshot, killed,
                 RpcTarget.Single(OwnerClientId, RpcTargetUse.Temp));
+    }
+
+    /// <summary>
+    /// 이 발사가 어느 SPOT 에서 이어진 것인지 찾고, 필요하면 V-TIME-01 을 기록한다.
+    ///
+    /// SPOT 하나당 최초 1발만 잰다. 연사 중 매 발을 재면 두 번째부터
+    /// 점점 커지는 무의미한 값이 분포에 쌓인다.
+    /// </summary>
+    /// <returns>이어진 SPOT id. 없으면 0.</returns>
+    private long ResolveSpotAndCheckReaction(
+        PlayerRewind aimTarget, float nowRt, int rttMs, int clientTick)
+    {
+        if (aimTarget == null) return 0;
+
+        var vs = VisibilitySystem.Instance;
+        if (vs == null) return 0;
+
+        ulong targetId = aimTarget.OwnerClientId;
+        if (!vs.TryGetSpot(OwnerClientId, targetId, out float spotTime, out long spotId))
+            return 0;
+
+        if (_reaction != null &&
+            _reaction.TryMeasure(targetId, spotId, nowRt, spotTime, rttMs,
+                                 out int adjustedMs, out int fastCount) &&
+            ReactionTimeValidator.IsImpossible(adjustedMs))
+        {
+            bool repeated = fastCount >= VTime.RepeatLimit;
+            ViolationLogger.Report(
+                clientId: OwnerClientId,
+                playerUid: PlayerUid,
+                code: VTime.CODE,
+                tick: clientTick,
+                severity: repeated ? VTime.SeverityRepeat : VTime.SeveritySingle,
+                detail: repeated ? "FastReactionRepeated" : "FastReaction",
+                rttMs: rttMs);
+        }
+
+        return spotId;
     }
 
     /// <summary>
@@ -311,22 +357,20 @@ public class WeaponSystem : NetworkBehaviour
     /// 차폐된 적은 제외한다. 벽 뒤 적을 우연히 겨눈 것을 정밀 조준으로
     /// 집계하면 aim_error 분포가 오염된다.
     /// </summary>
-    private void ResolveAimTarget(
+    private PlayerRewind ResolveAimTarget(
         Vector3 origin, Vector3 dir,
         List<PlayerRewind> rewound, PlayerRewind victimRewind,
-        out string targetUid, out float aimErrorDeg, out float targetDist)
+        out float aimErrorDeg, out float targetDist)
     {
-        targetUid = null;
         aimErrorDeg = -1f;
         targetDist = -1f;
 
         if (victimRewind != null)
         {
             Vector3 to = CenterOf(victimRewind) - origin;
-            targetUid = UidOf(victimRewind);
             aimErrorDeg = Vector3.Angle(dir, to);
             targetDist = to.magnitude;
-            return;
+            return victimRewind;
         }
 
         PlayerRewind best = null;
@@ -357,10 +401,10 @@ public class WeaponSystem : NetworkBehaviour
 
         if (best != null)
         {
-            targetUid = UidOf(best);
             aimErrorDeg = bestAngle;
             targetDist = bestLen;
         }
+        return best;
     }
 
     /// <summary>되감긴 상태의 몸통 중심. 히트박스가 실제로 놓인 위치다.</summary>
@@ -391,7 +435,7 @@ public class WeaponSystem : NetworkBehaviour
     private void EmitCombat(
         InputPayload input, int serverTick, int rttMs, int shotIndex,
         bool hit, bool headshot, bool killed, float dist, float rewindSec,
-        string targetUid, float aimErrorDeg)
+        string targetUid, float aimErrorDeg, long spotId)
     {
         var w = TelemetryWriter.Instance;
         if (w == null || !w.IsActive) return;
@@ -421,6 +465,8 @@ public class WeaponSystem : NetworkBehaviour
             targetUid != null ? TJson.Str(targetUid) : "null");
         _sb.Append(",\"aim_error_deg\":").Append(
             aimErrorDeg >= 0f ? TJson.F(aimErrorDeg) : "null");
+        _sb.Append(",\"spot_event_id\":").Append(
+            spotId > 0 ? spotId.ToString(TJson.Inv) : "null");
         _sb.Append(",\"rewind_ms\":").Append(
             Mathf.RoundToInt(rewindSec * 1000f).ToString(TJson.Inv));
         _sb.Append(",\"rtt_ms\":").Append(rttMs >= 0 ? rttMs.ToString(TJson.Inv) : "null");
