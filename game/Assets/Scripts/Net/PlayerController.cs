@@ -2,19 +2,29 @@
 //  PlayerController.cs
 //  경로: game/Assets/Scripts/Net/PlayerController.cs
 //
-//  W7 Day 2 변경 (2026-09-04)
+//  W7 Day 2 변경
+//   (1) 서버 조준각 보관 (serverAimYaw / serverAimPitch)
+//       Simulate() 는 transform.rotation 에 yaw 만 반영하고 pitch 는
+//       StatePayload 로 나가고 끝이라 서버에 남지 않았다.
+//       20Hz 가시성 루프가 조준 방향을 재구성하려면 둘 다 필요하다.
+//   (2) VisibilitySystem 등록/해제
+//   (3) V-MOVE 위반 기록에 서버 측정 RTT 를 넣는다 (기존 -1)
 //
-//  (1) 서버 조준각 보관.  ★
-//      Simulate() 는 transform.rotation 에 yaw 만 반영하고 pitch 는
-//      StatePayload 로 내보내고 끝이라, 서버에 pitch 가 남지 않았다.
-//      20Hz 가시성 루프가 조준 방향을 만들려면 둘 다 필요하다.
-//      → serverAimYaw / serverAimPitch 를 SubmitInputServerRpc 에서 갱신
+//  W7 Day 5 변경  ← 이번
+//   (4) 연사핵 / 트리거봇 하네스 배선
 //
-//  (2) VisibilitySystem 등록/해제.
+//       두 치트 모두 기존 입력 경로로만 공격한다. 서버가 관측하는 것은
+//       SubmitInputServerRpc 에 담긴 tick / yaw / pitch / buttons 뿐이라,
+//       외부 프로세스가 메모리를 조작하든 여기서 값을 바꾸든
+//       서버 측 흔적은 동일하다. L2 측정에는 이걸로 충분하다.
 //
-//  (3) V-MOVE 위반 기록에 서버 측정 RTT 를 넣는다.
-//      기존에는 -1 을 넣어 violations.rtt_ms 가 전부 null 이었다.
-//      위반이 회선 상태와 상관있는지 나중에 볼 수 없다.
+//       연사핵: 입력 개수는 60/s 그대로 두고 틱만 FireIntervalTicks 씩
+//               부풀린다. V-MOVE 는 개수만 보므로 통과하고, 서버의 발사
+//               게이트(틱 간격)도 매번 통과한다. 실시간 발사율만 6배가
+//               되어 V-FIRE-01 의 토큰 버킷에만 걸린다.
+//
+//       트리거봇: 조준선에 적이 걸리면 그 프레임에 발사 비트를 켠다.
+//               SPOT 직후 인간 하한 미만의 반응으로 관측된다.
 // =====================================================================
 
 using Unity.Netcode;
@@ -102,10 +112,9 @@ public class PlayerController : NetworkBehaviour
     //  서버 조준각 (W7 Day 2)
     // -----------------------------------------------------------------
     //
-    //  Simulate() 는 transform.rotation 에 yaw 만 반영한다. pitch 는
-    //  StatePayload 로 나가고 서버에는 남지 않아, 가시성 루프가 조준
-    //  방향을 재구성할 수 없었다. 마지막으로 "검증을 통과해 처리된"
-    //  입력의 각도만 보관한다. 거부된 입력은 반영하지 않는다.
+    //  마지막으로 "검증을 통과해 처리된" 입력의 각도만 보관한다.
+    //  거부된 입력을 반영하면 치터가 위반을 감수하고 서버가 아는
+    //  조준선을 흔들 수 있다.
 
     private float serverAimYaw = 0f;
     private float serverAimPitch = 0f;
@@ -123,7 +132,6 @@ public class PlayerController : NetworkBehaviour
     // --- RTT 측정 (클라이언트 표시용) ---
     // 주의: 이 값은 안티치트 판정에 쓰지 않는다. 클라이언트가 측정한 값이므로
     //       치터가 부풀려 검증 관용 범위를 넓힐 수 있다.
-    //       텔레메트리의 rtt_ms는 PlayerTelemetry가 서버에서 따로 측정한다.
     private CircularBuffer<float> sendTimeBuffer = new(1024);
     private float currentRttMs = 0f;
     public float CurrentRttMs => currentRttMs;
@@ -212,7 +220,7 @@ public class PlayerController : NetworkBehaviour
             sendTimeBuffer.Set(tick, Time.realtimeSinceStartup);
 
             // --- 치트 하네스 (테스트 전용) ---
-            // 실제 스피드핵과 같은 경로로 공격한다: 입력을 더 많이 보낸다.
+            // 실제 치트와 같은 경로로 공격한다: 입력을 조작해 보낸다.
             if (cheat != null && cheat.Active)
             {
                 switch (cheat.Pending)
@@ -239,17 +247,34 @@ public class PlayerController : NetworkBehaviour
                         return;
                 }
 
-                // 스피드핵: 같은 틱을 배율만큼 전송.
-                // 시간 조작 시 FixedUpdate가 더 자주 도는 것과
-                // 서버 관측 결과가 동일하다.
-                int mul = cheat.SpeedMultiplier;
-                for (int i = 0; i < mul; i++)
+                // --- 연사핵 ---
+                // 입력 개수는 60/s 그대로다. 틱만 FireIntervalTicks 씩 부풀려
+                // 서버의 발사 게이트(틱 간격)를 매번 통과시킨다.
+                //   V-MOVE   : 개수 60/s, 틱 점프 6 -> 둘 다 정상. 통과.
+                //   V-FIRE-01: 실시간으로는 초당 60발 요청 -> 토큰 버킷이 잡는다.
+                // 이동 속도는 변하지 않는다. 순수 연사속도 조작이다.
+                if (cheat.RapidFire)
                 {
-                    var fast = input;
-                    fast.tick = cheat.NextFakeTick(tick);
-                    SubmitInputServerRpc(fast);
+                    var rapid = input;
+                    rapid.tick = cheat.NextRapidTick(tick, WeaponConfig.FireIntervalTicks);
+                    SubmitInputServerRpc(rapid);
+                    return;
                 }
-                return;
+
+                // --- 스피드핵 ---
+                // 같은 입력을 배율만큼 전송. 시간 조작으로 FixedUpdate 가
+                // 더 자주 도는 것과 서버 관측 결과가 동일하다.
+                int mul = cheat.SpeedMultiplier;
+                if (mul > 1)
+                {
+                    for (int i = 0; i < mul; i++)
+                    {
+                        var fast = input;
+                        fast.tick = cheat.NextFakeTick(tick);
+                        SubmitInputServerRpc(fast);
+                    }
+                    return;
+                }
             }
 
             SubmitInputServerRpc(input);
@@ -305,6 +330,22 @@ public class PlayerController : NetworkBehaviour
         if (Input.GetKey(KeyCode.LeftControl)) buttons |= BTN_CROUCH;
         if (Input.GetKey(KeyCode.LeftShift)) buttons |= BTN_SPRINT;
         if (Input.GetMouseButton(0)) buttons |= BTN_FIRE;
+
+        // --- 치트: 발사 비트 주입 (테스트 전용) ---
+        // 카메라 transform 대신 currentYaw/Pitch 로 방향을 재구성한다.
+        // 서버가 input.yaw/pitch 로 하는 계산과 정확히 같아야
+        // 클라 판정과 서버 판정이 어긋나지 않는다.
+        if (cheat != null && cheat.Active)
+        {
+            if (cheat.RapidFire) buttons |= BTN_FIRE;
+
+            if (cheat.TriggerBot)
+            {
+                Vector3 eye = transform.position + WeaponConfig.EyeOffset;
+                Vector3 aim = Quaternion.Euler(currentPitch, currentYaw, 0f) * Vector3.forward;
+                if (cheat.TriggerBotWantsFire(eye, aim)) buttons |= BTN_FIRE;
+            }
+        }
 
         // 반동을 시야에 적용한다. 서버도 같은 패턴을 알고 있어
         // 조작 시 서버 계산과 어긋난다(W8 노리코일 탐지).
@@ -425,7 +466,6 @@ public class PlayerController : NetworkBehaviour
         //  위반이면 Simulate()를 아예 호출하지 않는다.
         //  롤백이 아니라 "서버가 움직여주지 않는다"가 처벌이다.
         //  클라이언트는 예측이 어긋나 다음 재조정에서 되돌아온다.
-        //  이미 만들어 둔 재조정 메커니즘이 그대로 교정 수단이 된다.
         // =============================================================
         if (validator != null)
         {
@@ -452,7 +492,6 @@ public class PlayerController : NetworkBehaviour
         lastProcessedTick = input.tick;
 
         // ★ W7-D2 ★ 검증을 통과한 입력의 조준각만 서버 상태로 남긴다.
-        // 거부된 입력을 반영하면 치터가 조준 방향을 조작할 수 있다.
         serverAimYaw = input.yaw;
         serverAimPitch = input.pitch;
 
