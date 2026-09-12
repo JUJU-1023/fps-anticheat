@@ -133,4 +133,4 @@ game/Build/
 game/UserSettings/
 game/obj/
 game/*.csproj
-game/*.sln
+game/*.slngame/telemetry/*.jsonl
