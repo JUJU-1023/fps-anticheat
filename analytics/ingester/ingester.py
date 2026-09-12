@@ -227,6 +227,7 @@ VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 """
 
 
+
 def apply_batch(db, records):
     """레코드 묶음을 하나의 트랜잭션으로 적재한다. 실패하면 예외."""
     moves = []
@@ -305,6 +306,9 @@ def apply_batch(db, records):
                     r.get("expected_recoil_pitch"),
                     r.get("rtt_ms"),
                     r.get("spot_event_id"),
+                    # 반동 인덱스 리셋 판정의 두 축. 첫 발은 null 로 들어온다.
+                    r.get("fire_gap_ticks"),
+                    r.get("fire_gap_ms"),
                 ))
 
             # 미지의 타입은 조용히 건너뛴다. 스키마가 앞서 나가도 깨지지 않는다.
