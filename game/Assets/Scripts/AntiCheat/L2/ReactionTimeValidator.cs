@@ -35,42 +35,48 @@
 //   S3(match 44, 정상 플레이 1087발)에서 13건이 발화했다. 치트는
 //   한 번도 쓰지 않았으므로 전부 오탐이다. 원인은 두 가지였다.
 //
-//   (1) 연사 도중 발사를 "반응"으로 쟀다
+//   (1) 연사 도중 발사를 "반응"으로 쟀다 (10건)
+//       교전 중 상대가 잠깐 시야에서 벗어났다 돌아오면 새 spotId 가
+//       발급되는데, 사수는 이미 발사 버튼을 누르고 있으므로 다음 발사
+//       게이트가 열리는 즉시 총알이 나가 4ms 가 측정된다.
+//       → shotIndex > 0 이면 측정하지 않는다. (게이트 1)
 //
-//       raw_ms   shot_index
-//         4.0        15      ← 연사 16번째 발
-//         6.0        10
-//        10.0        19      ← 연사 20번째 발
-//        16.0        13
-//
-//       SPOT 하나당 첫 발만 잰다는 기존 규칙은 "같은 spotId 를 두 번
-//       재지 않는다"였다. 그런데 교전 중 상대가 잠깐 시야에서 벗어났다
-//       돌아오면(ForgetSec 0.5초) 새 spotId 가 발급된다. 그 순간
-//       사수는 이미 발사 버튼을 누르고 있으므로, 다음 발사 게이트가
-//       열리는 즉시 총알이 나가 4ms 가 측정된다.
-//       → shotIndex > 0 이면 트리거를 이미 당기고 있었다는 뜻이므로
-//         측정하지 않는다.
-//
-//   (2) 재조우를 첫 조우로 쟀다
-//
-//       raw_ms   shot_index
-//         5.0         0
-//        20.0         0
-//        53.0         0
-//
-//       연사를 잠깐 멈췄다 재개한 경우다. shotIndex 는 0 으로 리셋됐지만
-//       총구는 계속 상대를 향하고 있었다. 이미 교전 중인 상대의 재등장은
-//       반응 대상이 아니다.
+//   (2) 재조우를 첫 조우로 쟀다 (3건)
+//       연사를 잠깐 멈췄다 재개한 경우. shotIndex 는 0 으로 리셋됐지만
+//       총구는 계속 상대를 향하고 있었다.
 //       → 최근 EngagementWindowSec 안에 같은 표적에게 쏜 적이 있으면
-//         측정하지 않는다.
+//         측정하지 않는다. (게이트 3)
 //
 //   탐지력 손실
 //     두 게이트 모두 측정 횟수를 줄이기만 하고 늘리지 않는다.
 //     트리거봇의 신호는 "처음 조준선에 들어온 순간 발사"이므로
-//     첫 조우에서 여전히 잡힌다. 지속 교전 중의 트리거봇은 놓치지만,
-//     그 구간은 사람과 구분되는 신호가 애초에 희박하다.
+//     첫 조우에서 여전히 잡힌다.
 //
-//   ※ 수정 후 F11(트리거봇) 하네스로 여전히 탐지되는지 반드시 확인할 것.
+//  ─────────────────────────────────────────────────────────────────
+//  ★ W8 변경 : 계측과 리스폰 처리 ★
+//
+//   (A) 분모를 남긴다
+//
+//     게이트 두 개를 넣은 뒤 "위반 N 건"만으로는 아무것도 말할 수 없다.
+//     측정 200회 중 1건과 측정 3회 중 1건은 완전히 다른 이야기인데,
+//     지금까지는 둘을 구분할 방법이 없었다.
+//
+//     TotalMeasured / TotalFast / Skipped* 를 누적하고 StatsLine() 으로
+//     노출한다. WeaponSystem 이 리스폰·디스폰 시 Debug.Log 로 남기면
+//     Promtail → Loki 로 들어가 사후에 조회할 수 있다.
+//     DB 스키마 변경이 필요 없다.
+//
+//   (B) Reset 을 두 단계로 쪼갠다
+//
+//     기존에는 사수가 리스폰할 때마다 Reset() 이 _history 를 통째로
+//     비웠다. _history 는 최근 20회 측정의 누적이고 RepeatLimit(5회)
+//     판정의 근거인데, 죽을 때마다 지워지면 severity 3
+//     (FastReactionRepeated) 은 실전에서 사실상 발생하지 않는다.
+//     W13 Trust Score 의 입력으로도 못 쓴다.
+//
+//     리스폰 시 비워야 하는 것은 표적별 상태뿐이다.
+//       ResetForRespawn() : _measured, _lastFireAt  (리스폰)
+//       Reset()           : 위 + _history + 카운터  (매치 경계)
 //
 //  ─────────────────────────────────────────────────────────────────
 //  왜 차단하지 않는가
@@ -136,13 +142,31 @@ public class ReactionTimeValidator
     /// </summary>
     private readonly Dictionary<ulong, float> _lastFireAt = new();
 
+    // -----------------------------------------------------------------
+    //  계측 (W8 추가)
+    //
+    //  오탐률을 말하려면 분자(위반)뿐 아니라 분모(측정)가 필요하다.
+    //  Skipped* 는 게이트가 얼마나 먹었는지를 보여준다. 이 값이
+    //  TotalMeasured 를 압도하면 게이트가 과한 것이다.
+    // -----------------------------------------------------------------
+
+    /// <summary>실제로 측정한 횟수. 오탐률의 분모.</summary>
     public int TotalMeasured { get; private set; }
 
-    /// <summary>연사 도중이라 건너뛴 횟수. 튜닝 확인용.</summary>
+    /// <summary>측정치 중 인간 하한을 밑돈 횟수. 오탐률의 분자.</summary>
+    public int TotalFast { get; private set; }
+
+    /// <summary>연사 도중이라 건너뛴 횟수 (게이트 1).</summary>
     public int SkippedBurst { get; private set; }
 
-    /// <summary>교전 중 재조우라 건너뛴 횟수. 튜닝 확인용.</summary>
+    /// <summary>같은 SPOT 을 이미 측정해서 건너뛴 횟수 (게이트 2).</summary>
+    public int SkippedSameSpot { get; private set; }
+
+    /// <summary>교전 중 재조우라 건너뛴 횟수 (게이트 3).</summary>
     public int SkippedReengage { get; private set; }
+
+    /// <summary>SPOT 이 없어 건너뛴 횟수. 정상 경로에서는 거의 0 이어야 한다.</summary>
+    public int SkippedNoSpot { get; private set; }
 
     /// <summary>
     /// 이번 발사의 반응시간을 잰다.
@@ -171,6 +195,7 @@ public class ReactionTimeValidator
 
         if (spotId <= 0)
         {
+            SkippedNoSpot++;
             NoteFire(targetId, now);
             return false;
         }
@@ -178,9 +203,14 @@ public class ReactionTimeValidator
         // --- 게이트 1 : 연사 도중 ---
         // 트리거를 이미 당기고 있었으므로 이 발사는 반응이 아니다.
         // shotIndex 0 만 통과시킨다.
+        //
+        // 이 SPOT 은 소비된 것으로 표시한다. 연사가 시작된 뒤 발급된
+        // SPOT 이라면, 같은 SPOT 안에서 나중에 shotIndex 가 0 으로
+        // 리셋되더라도 그건 첫 조우가 아니기 때문이다.
         if (shotIndex > 0)
         {
             SkippedBurst++;
+            _measured[targetId] = spotId;
             NoteFire(targetId, now);
             return false;
         }
@@ -188,6 +218,7 @@ public class ReactionTimeValidator
         // --- 게이트 2 : 같은 SPOT 재측정 ---
         if (_measured.TryGetValue(targetId, out long last) && last == spotId)
         {
+            SkippedSameSpot++;
             NoteFire(targetId, now);
             return false;
         }
@@ -202,6 +233,7 @@ public class ReactionTimeValidator
         //   spotTime - lastFire = 시야가 끊겨 있던 시간
         //     짧으면(0.6초) 잠깐 가려졌다 나온 것 → 재조우
         //     길면(5초)     실제로 놓쳤다 다시 발견 → 첫 조우로 측정
+        //     음수         SPOT 성립 이후에 이미 쐈다 → 당연히 교전 중
         if (_lastFireAt.TryGetValue(targetId, out float lastFire) &&
             spotTime - lastFire < VTime.EngagementWindowSec)
         {
@@ -225,6 +257,8 @@ public class ReactionTimeValidator
             if (IsImpossible(v)) fastCount++;
 
         TotalMeasured++;
+        if (IsImpossible(adjustedMs)) TotalFast++;
+
         NoteFire(targetId, now);
         return true;
     }
@@ -242,6 +276,29 @@ public class ReactionTimeValidator
     public static bool IsImpossible(int adjustedMs)
         => adjustedMs + VTime.SpotQuantizationMs < VTime.ThresholdMs;
 
+    /// <summary>
+    /// 세션 누적 계측. 서버 로그로 남겨 Loki 에서 조회한다.
+    ///
+    /// 읽는 법
+    ///   measured 가 한 자리면 그 매치의 V-TIME 결과는 통계적으로
+    ///   아무 의미가 없다. 게이트를 완화하거나 측정 설계를 바꿔야 한다.
+    ///   skipBurst 가 measured 의 수십 배인 것은 정상이다.
+    ///   연사 대부분이 게이트 1 에 걸리는 것이 설계 의도다.
+    /// </summary>
+    public string StatsLine()
+        => $"measured={TotalMeasured} fast={TotalFast} " +
+           $"skipBurst={SkippedBurst} skipSameSpot={SkippedSameSpot} " +
+           $"skipReengage={SkippedReengage} skipNoSpot={SkippedNoSpot} " +
+           $"windowFast={CurrentFastCount()}/{_history.Count}";
+
+    /// <summary>현재 창 안의 임계 미만 횟수.</summary>
+    public int CurrentFastCount()
+    {
+        int n = 0;
+        foreach (int v in _history) if (IsImpossible(v)) n++;
+        return n;
+    }
+
     /// <summary>표적이 사라지면 정리한다.</summary>
     public void Forget(ulong targetId)
     {
@@ -249,12 +306,35 @@ public class ReactionTimeValidator
         _lastFireAt.Remove(targetId);
     }
 
+    /// <summary>
+    /// 사수가 리스폰할 때 호출한다.
+    ///
+    /// 표적별 교전 상태만 버린다. 죽었다 살아난 뒤의 조우는 첫 조우로
+    /// 보는 것이 맞기 때문이다.
+    ///
+    /// _history 와 카운터는 유지한다. 매치 전체에 걸친 누적이라야
+    /// RepeatLimit 판정과 W13 feature 가 성립한다.
+    /// </summary>
+    public void ResetForRespawn()
+    {
+        _measured.Clear();
+        _lastFireAt.Clear();
+    }
+
+    /// <summary>
+    /// 매치 경계에서만 호출한다. 측정 이력과 카운터까지 전부 버린다.
+    /// 리스폰에는 ResetForRespawn() 을 쓴다.
+    /// </summary>
     public void Reset()
     {
         _history.Clear();
         _measured.Clear();
         _lastFireAt.Clear();
+        TotalMeasured = 0;
+        TotalFast = 0;
         SkippedBurst = 0;
+        SkippedSameSpot = 0;
         SkippedReengage = 0;
+        SkippedNoSpot = 0;
     }
 }

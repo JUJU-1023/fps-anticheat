@@ -446,3 +446,122 @@ W12 에서 외부 치트 exe 로 치트 세션을 측정하면 산출할 수 있
 | `game/Assets/Scripts/AntiCheat/L2/` | 검증기 구현 |
 | `game/Assets/Editor/MeasurementMapBuilder.cs` | 측정 맵 생성기 |
 | `game/Assets/Scripts/Map/MapManifest.cs` | 배포 검증용 지오메트리 해시 |
+
+### 오탐 측정 결과 (2026-09-12 확정)
+
+| 매치 | 상태 | 측정후보 | 위반 | 오탐률 |
+|---|---|---|---|---|
+| 44 | 게이트 추가 전 | 68 | 13 | 19.1% |
+| 57 | 게이트 추가 후 | 64 | 1 | 1.6% |
+
+플레이어별 내역
+
+| 매치 | player 1 | player 19 |
+|---|---|---|
+| 44 | 33 / 9 (27.3%) | 35 / 4 (11.4%) |
+| 57 | 35 / 1 (2.9%) | 29 / 0 (0%) |
+
+측정 기회가 68 대 64로 거의 같은 상태에서의 비교이므로
+"13건 → 1건"을 그대로 인용 가능하다.
+
+**주의 — 분모의 성격**
+위 측정후보는 게이트 3(재조우) 적용 전의 상한이다.
+`shot_index = 0` 이면서 `spot_event_id` 가 있는 발사를 센 값이라
+게이트 3이 걷어낸 만큼 실제 측정 횟수보다 크다.
+따라서 두 오탐률 모두 실제보다 낮게 잡혀 있다. 감소 배수는 유효하다.
+정확한 분모는 ReactionTimeValidator.StatsLine() 이
+다음 세션부터 서버 로그에 남긴다.
+
+**잔여 1건**
+match 57 player 1 의 1건은 선조준(pre-aim) 케이스로 추정된다.
+코너를 미리 겨누고 있다가 적이 나타나자마자 쏘면 사람도
+60ms 미만이 나온다. 게이트로 제거할 수 없는 종류이므로
+1.6% 를 현실적 바닥으로 본다.
+
+**FastReactionRepeated 0 건**
+match 44 / 57 양쪽 모두 detail_json 이 전부 FastReaction 이다.
+match 44 의 player 1 은 측정 33 회 중 9 회가 임계 미만(27%)이었으므로
+WindowSize 20 / RepeatLimit 5 조건에 여러 번 걸렸어야 한다.
+원인은 WeaponSystem.ServerOnRespawn 의 _reaction.Reset() 이
+리스폰마다 _history 를 통째로 비우는 것으로 추정된다.
+W8 에서 ResetForRespawn() 으로 분리해 수정했다.
+다음 측정에서 Repeated 가 발생하면 확정.
+
+### 재현 쿼리
+
+측정후보(분모)
+
+```sql
+SELECT player_id,
+       COUNT(*) AS first_shots,
+       COUNT(DISTINCT spot_event_id) AS candidate_measurements
+FROM combat_events
+WHERE match_id = ?
+  AND event_type IN ('FIRE','HIT','KILL')
+  AND spot_event_id IS NOT NULL
+  AND shot_index = 0
+GROUP BY player_id;
+```
+
+위반(분자)
+
+```sql
+SELECT match_id, player_id,
+       COUNT(*) AS rows_logged,
+       SUM(occurrences) AS total_occurrences,
+       detail_json
+FROM violations
+WHERE match_id IN (?, ?) AND code = 'V-TIME-01'
+GROUP BY match_id, player_id, detail_json;
+```
+
+violations 는 행 하나가 위반 하나가 아니다. occurrences 컬럼으로
+반복이 접힐 수 있으므로 반드시 SUM(occurrences) 를 쓴다.
+(match 44 / 57 에서는 둘이 일치했다.)
+
+
+## 반동 인덱스 축 불일치 (W8 사전 측정)
+
+`RecoilResetTicks = 21` (약 0.35초) 기준, match 57 실측.
+
+| 기준 | 불일치 | 전체 | 비율 |
+|---|---|---|---|
+| 발사 | 2 | 1304 | 0.28% |
+| 버스트 | 2 | 144 | 1.4% |
+
+플레이어별로는 player 1 이 2/84 (2.4%), player 19 가 0/60 (0%).
+
+**배경**
+연사 중단 판정 기준이 클라와 서버에서 다르다.
+
+| | 판정식 | 축 |
+|---|---|---|
+| 클라 `_clientShotIndex` | `tick - _clientLastFireTick > RecoilResetTicks` | 클라 틱 |
+| 서버 `_shotIndex` | `now - _lastFireRealtime > RecoilResetTicks / 60` | 서버 실시간 |
+
+서버가 실시간을 쓰는 것은 의도된 설계다. 틱으로 판정하면 틱을 크게
+점프시켜 매 발을 `shot_index = 0` 으로 만들 수 있고,
+`expected_recoil_pitch` 가 항상 0 이 되어 노리코일 탐지가
+비교할 기준선을 잃는다. 대가로 두 축이 갈라질 수 있다.
+
+**결론**
+0.28% 는 8발 연사 시 누적 세로 반동 약 6도 대비 무시 가능한 수준이다.
+`expected_recoil_pitch` 를 노리코일 탐지 기준선으로 사용 가능.
+
+**설계 제약**
+버스트 기준으로는 1.4~2.4% 다. 한 번 어긋나면 그 연사 전체가
+오염되므로 이쪽이 실질적 오차 바닥이다.
+따라서 노리코일 판정은 단일 버스트가 아니라
+최근 N 개 버스트 중 M 개 이상 형태의 창 기반이어야 한다.
+V-TIME-01 의 WindowSize / RepeatLimit 와 같은 구조.
+
+**참고 수치 (match 57)**
+- 총 1304 발 / 144 버스트 = 평균 9.1 발
+- `RecoilRampShots = 8` 이므로 대부분의 버스트가 램프를 끝까지 밟는다
+
+**측정 방법 주의**
+위 수치는 `client_tick` 간격으로 클라 판정을 역산한 값이다.
+`client_tick` 이 단조 증가한다는 가정이 필요하므로
+rapidfire 처럼 틱을 부풀리는 치트 세션에서는 이 방법이 깨진다.
+치트 측정에는 새로 추가한 `fire_gap_ticks` / `fire_gap_ms` 를 쓴다.
+서버가 그 순간 직접 잰 값이라 가정이 필요 없다.

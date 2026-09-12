@@ -134,3 +134,6 @@ game/UserSettings/
 game/obj/
 game/*.csproj
 game/*.slngame/telemetry/*.jsonl
+
+# 텔레메트리 출력 (에디터 세션마다 재생성, VM 쪽 ingester 가 소비)
+game/telemetry/

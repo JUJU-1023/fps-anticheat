@@ -17,9 +17,53 @@
 //  W7 Day 1 : 레이어 분리로 랙 보상 복구, V-FIRE-01 토큰 버킷
 //  W7 Day 3 : 조준 오차 / 표적 식별 / V-LOS BlockedHit
 //  W7 Day 4 : spot_event_id 기록, V-TIME-01 배선
-//  W7 Day 5 : shotIndex 를 V-TIME-01 에 전달  ← 이번 변경
-//             + OnClientFired 이벤트 (사운드/이펙트용)
+//  W7 Day 5 : shotIndex 를 V-TIME-01 에 전달, OnClientFired 이벤트
+//  W8  Day 1 : 반동 인덱스 축 불일치 계측 + 발사 경로 카운터  ← 이번 변경
 //
+//  ─────────────────────────────────────────────────────────────────
+//  ★ W8 : 왜 fire_gap_ticks 와 fire_gap_ms 를 둘 다 남기는가 ★
+//
+//   연사 중단(= 반동 인덱스 리셋) 판정 기준이 클라와 서버에서 다르다.
+//
+//     클라 _clientShotIndex : tick - _clientLastFireTick > RecoilResetTicks
+//                             → 클라 틱 축
+//     서버 _shotIndex       : now  - _lastFireRealtime  > RecoilResetTicks/60
+//                             → 서버 실시간 축
+//
+//   서버가 실시간을 쓰는 것은 의도된 설계다. 틱으로 판정하면 틱을 크게
+//   점프시켜 매 발을 shotIndex=0 으로 만들 수 있고, expected_recoil_pitch
+//   가 항상 0 이 되어 노리코일 탐지가 비교할 기준선을 잃는다.
+//
+//   대가는 두 축이 갈라질 수 있다는 것이다. RTT 지터나 패킷 지연으로
+//   서버 실시간 간격만 임계를 넘으면, 서버는 인덱스를 리셋했는데 클라는
+//   안 한 상태가 된다. 그러면 클라가 실제 화면에 적용한 반동과 서버가
+//   기대하는 expected_recoil_pitch 가 어긋난다.
+//
+//   노리코일 탐지는 이 둘의 차이를 보는 것이므로, 정상 플레이에서
+//   차이가 생기면 탐지 자체가 성립하지 않는다. W8 반동 설계에 들어가기
+//   전에 불일치율을 실측해야 한다. 그래서 두 축의 간격을 그대로 남긴다.
+//
+//   판정은 SQL 에서 한다. 서버가 미리 "불일치"로 접어서 저장하지 않는
+//   이유는 RecoilResetTicks 를 나중에 조정할 때 과거 데이터를 다시
+//   해석할 수 있어야 하기 때문이다.
+//
+//   두 값 모두 첫 발에서는 기준이 없으므로 null 이다.
+//
+//  ─────────────────────────────────────────────────────────────────
+//  ★ W8 : 발사 경로 카운터 ★
+//
+//   거부된 발사는 combat_events 에 아무 행도 남기지 않는다. 특히
+//   FireRejectReason.None 으로 거부되는 경로는 ViolationLogger 에도
+//   안 남아서 완전히 보이지 않았다.
+//
+//   그런데 서버가 거부한 발사는 클라에서는 이미 성립해 _clientShotIndex
+//   가 올라간 상태다. 거부가 한 번 일어나면 그 연사 내내 두 인덱스가
+//   어긋난다. 지터보다 훨씬 큰 불일치 원인이므로 빈도를 알아야 한다.
+//
+//   행을 더 만들지 않고 카운터로 세서 리스폰·디스폰 시 로그로 남긴다.
+//   Promtail → Loki 로 들어가므로 스키마 변경 없이 조회된다.
+//
+//  ─────────────────────────────────────────────────────────────────
 //  aim_error_deg 를 발사 시점에 계산하는 이유
 //   20Hz 가시성 루프에서 가져오면 최대 50ms 묵은 값이라 플릭 사격에서
 //   크게 어긋난다. FireHitscan 안에서는 이미 전원을 되감아 놓은
@@ -76,6 +120,13 @@ public class WeaponSystem : NetworkBehaviour
     private float _lastFireRealtime = -999f;
     private int _shotIndex = 0;      // 연사 중 몇 번째 발인지 (반동 인덱스)
 
+    // --- 서버 발사 경로 카운터 (W8) ---
+    // 거부된 발사는 combat_events 에 남지 않으므로 여기서 센다.
+    private int _fireAccepted;
+    private int _fireGateRejected;       // 게임플레이 발사 간격 게이트
+    private int _fireViolationRejected;  // V-FIRE-01, 사유 있음
+    private int _fireSilentRejected;     // V-FIRE-01, 사유 None (흔적 없던 경로)
+
     private FireRateValidator _fireValidator;
     private ReactionTimeValidator _reaction;
 
@@ -87,7 +138,7 @@ public class WeaponSystem : NetworkBehaviour
     private PlayerRewind _rewind;
     private PlayerTelemetry _telemetry;
 
-    private static readonly StringBuilder _sb = new StringBuilder(480);
+    private static readonly StringBuilder _sb = new StringBuilder(520);
 
     /// <summary>히트스캔 대상: 되감긴 히트박스 + 벽. 플레이어 본체는 제외.</summary>
     private int _raycastMask;
@@ -113,6 +164,30 @@ public class WeaponSystem : NetworkBehaviour
             _reaction = new ReactionTimeValidator();
         }
     }
+
+    /// <summary>
+    /// 세션 최종 계측을 남긴다.
+    ///
+    /// V-TIME 은 위반 건수만으로는 해석할 수 없다. 측정 자체가 몇 번
+    /// 일어났는지(분모)를 모르면 "위반 1건"이 오탐률 0.5% 인지 33% 인지
+    /// 구분되지 않는다. 발사 경로 카운터도 같은 이유다.
+    /// </summary>
+    public override void OnNetworkDespawn()
+    {
+        if (IsServer)
+        {
+            Debug.Log($"[FIRE] final uid={PlayerUid} {FireStatsLine()}");
+            if (_reaction != null)
+                Debug.Log($"[VTIME] final uid={PlayerUid} {_reaction.StatsLine()}");
+        }
+
+        base.OnNetworkDespawn();
+    }
+
+    private string FireStatsLine()
+        => $"accepted={_fireAccepted} gateRejected={_fireGateRejected} " +
+           $"violationRejected={_fireViolationRejected} " +
+           $"silentRejected={_fireSilentRejected}";
 
     /// <summary>
     /// 히트스캔이 볼 레이어를 구성한다.
@@ -147,6 +222,9 @@ public class WeaponSystem : NetworkBehaviour
     /// 소유 클라이언트가 발사 입력을 만들 때 호출한다.
     /// 반동만큼 시야를 밀어 올린다. 서버도 같은 패턴을 알고 있으므로
     /// 이 값이 조작되면 서버 계산과 어긋난다.
+    ///
+    /// ※ 여기의 리셋은 클라 틱 축이고 서버는 실시간 축이다. 두 축의
+    ///   불일치가 W8 노리코일 탐지의 오차 바닥이 된다. 파일 상단 참조.
     /// </summary>
     public Vector2 ClientTryFire(int tick, bool firePressed)
     {
@@ -178,6 +256,14 @@ public class WeaponSystem : NetworkBehaviour
 
         float now = Time.realtimeSinceStartup;
 
+        // --- 두 축의 간격을 리셋 판정 이전에 붙잡는다 (W8 계측) ---
+        // 첫 발은 기준이 없으므로 -1 로 두고 텔레메트리에서 null 로 나간다.
+        int gapTicks = input.tick - _lastFireTick;
+        int reportGapTicks = _lastFireTick < 0 ? -1 : gapTicks;
+        int reportGapMs = _lastFireRealtime < 0f
+                        ? -1
+                        : Mathf.RoundToInt((now - _lastFireRealtime) * 1000f);
+
         // --- 연사 중단 판정 (서버 실시간 기준) ---
         // 클라 틱으로 판정하면 틱을 크게 점프시켜 매 발을 shotIndex=0 으로
         // 만들 수 있고, expected_recoil_pitch 가 항상 0 이 되어
@@ -186,25 +272,40 @@ public class WeaponSystem : NetworkBehaviour
             _shotIndex = 0;
 
         // --- 게임플레이 게이트 (게임시간 기준) ---
-        if (input.tick - _lastFireTick < WeaponConfig.FireIntervalTicks) return;
+        if (gapTicks < WeaponConfig.FireIntervalTicks)
+        {
+            _fireGateRejected++;
+            return;
+        }
 
         // --- V-FIRE-01 : 실시간 상한 ---
         if (!_fireValidator.TryFire(now, out var reason))
         {
             if (reason != FireRejectReason.None)
+            {
+                _fireViolationRejected++;
                 ViolationLogger.Report(
                     OwnerClientId, PlayerUid, VFire.CODE,
                     input.tick, VFire.Severity, reason.ToString(), rttMs);
+            }
+            else
+            {
+                // 사유 없는 거부. 지금까지 어디에도 남지 않던 경로다.
+                // 클라는 이미 발사가 성립해 _clientShotIndex 를 올린 상태라
+                // 이 한 건이 연사 내내 인덱스 불일치를 만든다.
+                _fireSilentRejected++;
+            }
             return;
         }
 
+        _fireAccepted++;
         _lastFireTick = input.tick;
         _lastFireRealtime = now;
 
         int shotIndex = _shotIndex;
         _shotIndex++;
 
-        FireHitscan(input, serverTick, rttMs, shotIndex);
+        FireHitscan(input, serverTick, rttMs, shotIndex, reportGapTicks, reportGapMs);
     }
 
     /// <summary>리스폰 시 호출. 유예를 다시 주고 상태를 초기화한다.</summary>
@@ -212,14 +313,25 @@ public class WeaponSystem : NetworkBehaviour
     {
         if (!IsServer) return;
         float now = Time.realtimeSinceStartup;
+
         _fireValidator?.ResetGrace(now);
-        _reaction?.Reset();
+
+        // 표적별 교전 상태만 버린다. _history 와 누적 카운터는 유지한다.
+        // 매치 단위 누적이라야 RepeatLimit(최근 20회 중 5회) 판정이
+        // 성립하고, W13 Trust Score 의 입력으로도 쓸 수 있다.
+        if (_reaction != null)
+        {
+            Debug.Log($"[VTIME] respawn uid={PlayerUid} {_reaction.StatsLine()}");
+            _reaction.ResetForRespawn();
+        }
+
         _shotIndex = 0;
         _lastFireTick = -1000;
         _lastFireRealtime = -999f;
     }
 
-    private void FireHitscan(InputPayload input, int serverTick, int rttMs, int shotIndex)
+    private void FireHitscan(InputPayload input, int serverTick, int rttMs,
+                            int shotIndex, int gapTicks, int gapMs)
     {
         // --- 조준 원점과 방향 ---
         // 클라이언트가 보낸 위치는 쓰지 않는다.
@@ -302,7 +414,7 @@ public class WeaponSystem : NetworkBehaviour
         }
 
         // --- V-TIME-01 : 반응시간 ---
-        // ★ W7 Day 5 ★ shotIndex 를 넘긴다. 연사 도중 발사는 반응이 아니다.
+        // shotIndex 를 넘긴다. 연사 도중 발사는 반응이 아니다. (W7 Day 5)
         long spotId = ResolveSpotAndCheckReaction(
             aimTarget, nowRt, rttMs, input.tick, shotIndex);
 
@@ -312,7 +424,7 @@ public class WeaponSystem : NetworkBehaviour
         EmitCombat(input, serverTick, rttMs, shotIndex,
                    hit, headshot, killed, reportDist, rewindSec,
                    aimTarget != null ? UidOf(aimTarget) : null,
-                   aimErrorDeg, spotId);
+                   aimErrorDeg, spotId, gapTicks, gapMs);
 
         if (hit)
             HitFeedbackClientRpc(headshot, killed,
@@ -326,10 +438,7 @@ public class WeaponSystem : NetworkBehaviour
     /// 두 게이트가 추가됐다 (ReactionTimeValidator 참조).
     ///
     ///   - shotIndex > 0  : 트리거를 이미 당기고 있었으므로 반응이 아니다.
-    ///                      정상 플레이 오탐 13건 중 10건이 이 경우였다
-    ///                      (shot_index 15, 19, 13, 10, 9, 8 ...).
     ///   - 3초 내 재발사   : 교전 중이던 상대의 재등장은 첫 조우가 아니다.
-    ///                      나머지 3건이 이 경우였다.
     ///
     /// spotId 는 게이트에 걸려도 그대로 반환한다. 텔레메트리에는 남겨
     /// SQL 로 사후 분석할 수 있어야 하기 때문이다. 서버 판정과 오프라인
@@ -463,7 +572,8 @@ public class WeaponSystem : NetworkBehaviour
     private void EmitCombat(
         InputPayload input, int serverTick, int rttMs, int shotIndex,
         bool hit, bool headshot, bool killed, float dist, float rewindSec,
-        string targetUid, float aimErrorDeg, long spotId)
+        string targetUid, float aimErrorDeg, long spotId,
+        int gapTicks, int gapMs)
     {
         var w = TelemetryWriter.Instance;
         if (w == null || !w.IsActive) return;
@@ -495,6 +605,13 @@ public class WeaponSystem : NetworkBehaviour
             aimErrorDeg >= 0f ? TJson.F(aimErrorDeg) : "null");
         _sb.Append(",\"spot_event_id\":").Append(
             spotId > 0 ? spotId.ToString(TJson.Inv) : "null");
+
+        // 반동 인덱스 리셋 판정의 두 축. 첫 발은 기준이 없으므로 null.
+        _sb.Append(",\"fire_gap_ticks\":").Append(
+            gapTicks >= 0 ? gapTicks.ToString(TJson.Inv) : "null");
+        _sb.Append(",\"fire_gap_ms\":").Append(
+            gapMs >= 0 ? gapMs.ToString(TJson.Inv) : "null");
+
         _sb.Append(",\"rewind_ms\":").Append(
             Mathf.RoundToInt(rewindSec * 1000f).ToString(TJson.Inv));
         _sb.Append(",\"rtt_ms\":").Append(rttMs >= 0 ? rttMs.ToString(TJson.Inv) : "null");
