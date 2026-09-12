@@ -222,8 +222,9 @@ INSERT INTO combat_events
  (match_id, player_id, target_id, event_type, weapon_id, shot_index,
   server_tick, client_tick, server_time,
   target_dist, aim_error_deg, rewind_ms, is_headshot,
-  yaw, pitch, expected_recoil_pitch, rtt_ms, spot_event_id)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+  yaw, pitch, expected_recoil_pitch, rtt_ms, spot_event_id,
+  fire_gap_ticks, fire_gap_ms)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 """
 
 
