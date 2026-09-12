@@ -17,16 +17,56 @@
 //  실측 근거 (2026-09-02, 정상 플레이 1482 샘플)
 //   input_count 분포: 4(5) 5(38) 6(1394) 7(39) 8(4) 11(1) 12(1)
 //   - 94%가 정확히 6, 지터로 ±2 흔들림, 평균은 6에 수렴
-//   - 9 이상 2건은 모두 접속 직후(client_tick 104, 262)
 //   → 창 단위 카운팅이면 44건 오탐. 토큰 버킷이 이 편차를 흡수한다.
-//   → 버킷 용량 20이면 실측 최대 12를 여유 있게 수용한다.
 //
 //  틱 비교에 관한 주의 (2026-09-02 수정)
 //   클라이언트 틱과 서버 틱은 서로 다른 시점에 0에서 시작하는
 //   독립된 시간축이다. 실측에서 server_tick=6171 일 때
 //   client_tick=1930 으로 4241틱 차이가 났다.
 //   따라서 "클라 틱이 서버 틱보다 앞선다"는 비교는 성립하지 않는다.
-//   대신 같은 시간축 안에서 lastProcessedTick 대비 점프 폭을 본다.
+//
+//  ─────────────────────────────────────────────────────────────────
+//  ★ W7 Day 5 실측으로 드러난 오탐과 수정 ★
+//
+//   S2(match 52, 정상 플레이 1039발)에서 183건이 발화했다.
+//   치트는 쓰지 않았다. 로그를 보면 원인이 명확하다.
+//
+//     server_time              occurrences  rtt_ms
+//     11:43:21.240                       1     232
+//     11:43:32.223                      26     915
+//     11:43:33.274                       5     772
+//     11:43:35.457                       9    1106
+//     11:43:39.408                      29     822
+//     11:43:44.526                      65       6
+//
+//   RTT 가 평소 2~8ms 에서 1106ms 까지 튀었다. 네트워크가 끊겼다
+//   복구되는 동안 밀린 입력이 한꺼번에 도착했고, 마지막 65건은
+//   그 백로그가 몰려 들어온 순간이다.
+//
+//   (1) 충전율에 여유가 없었다
+//
+//       RefillPerSec 60 = 정상 입력율 60/s. 여유가 정확히 0이다.
+//       잔량이 랜덤워크가 되어 지터만으로도 언젠가 반드시 0에 닿는다.
+//       → 충전을 75/s 로 올려 25% 여유를 둔다.
+//
+//   (2) 용량이 히컵을 못 버텼다
+//
+//       용량 20 = 0.33초 분량. RTT 1초 스파이크의 백로그(60개)를
+//       흡수할 수 없다.
+//       → 90 (1.5초 분량) 으로 올린다.
+//
+//   (3) 순간 고갈과 지속 고갈을 구분하지 않았다  ★ 핵심
+//
+//       네트워크 히컵은 짧고, 스피드핵은 지속된다. 그것이 둘을
+//       가르는 유일하고 확실한 차이다.
+//       → 토큰이 SustainedDrainSec 이상 연속으로 0에 머물 때만
+//         위반으로 기록한다. 그 전에는 차단만 하고 기록하지 않는다.
+//
+//   탐지 지연 트레이드오프
+//     2배 스피드핵(120/s) 기준 용량 90 이 비는 데 2초, 지속 판정 1초를
+//     더해 약 3초 뒤 탐지된다. 3배면 약 1.9초.
+//     오탐을 줄이는 대신 탐지가 느려진다. 치트는 지속되므로 이 지연은
+//     감수할 수 있다고 판단했다.
 // =====================================================================
 
 using UnityEngine;
@@ -34,20 +74,30 @@ using UnityEngine;
 public static class VMove
 {
     // --- 토큰 버킷 ---
-    /// <summary>초당 충전 토큰 수. 정상 FixedUpdate 주기와 같다.</summary>
-    public const float RefillPerSec = 60f;
+    /// <summary>
+    /// 초당 충전 토큰 수.
+    /// 정상 입력율(60/s)보다 25% 높게 둔다. 같으면 잔량이 랜덤워크가 되어
+    /// 지터만으로도 언젠가 반드시 고갈된다. (W7 Day 5 실측)
+    /// </summary>
+    public const float RefillPerSec = 75f;
 
     /// <summary>
-    /// 버킷 용량. 실측 최대 12에 여유를 둔 값.
-    /// 클수록 오탐이 줄고 순간 폭주 허용량이 늘어난다.
+    /// 버킷 용량. 1.5초 분량.
+    /// 네트워크 히컵으로 밀린 입력이 한꺼번에 도착하는 것을 흡수한다.
+    /// 실측에서 RTT 1106ms 스파이크를 관측했으므로 1초 이상이 필요하다.
     /// </summary>
-    public const float BucketCapacity = 20f;
+    public const float BucketCapacity = 90f;
+
+    /// <summary>
+    /// 토큰이 연속으로 이 시간 이상 0에 머물 때만 위반으로 기록한다.
+    /// 네트워크 히컵은 짧고 스피드핵은 지속된다는 것이 판정 근거다.
+    /// </summary>
+    public const float SustainedDrainSec = 1.0f;
 
     // --- 틱 검사 ---
     /// <summary>
     /// 직전에 처리한 틱 대비 허용 점프 폭(2초분).
     /// 패킷 손실로 입력이 통째로 유실될 수 있으므로 여유가 필요하다.
-    /// 서버 틱과 비교하지 않는 이유는 파일 상단 주석 참조.
     /// </summary>
     public const int MaxTickJump = 120;
 
@@ -66,7 +116,7 @@ public static class VMove
 public enum MoveRejectReason
 {
     None = 0,
-    RateExceeded,    // 토큰 버킷 고갈 = 스피드핵
+    RateExceeded,    // 토큰 버킷 지속 고갈 = 스피드핵
     TickReplay,      // 이미 처리한 틱 재전송
     TickAhead,       // 직전 틱 대비 과도한 점프
     BadInput,        // NaN / 무한대 / move 크기 초과
@@ -83,12 +133,21 @@ public class MovementValidator
     private float _tokens = VMove.BucketCapacity;
     private float _lastRefillTime;
 
+    /// <summary>
+    /// 토큰이 0에 닿은 시각. 회복하면 -1로 되돌린다.
+    /// 순간 고갈(네트워크 히컵)과 지속 고갈(치트)을 구분하는 기준이다.
+    /// </summary>
+    private float _drainStartTime = -1f;
+
     // 스폰 유예
     private float _spawnTime;
 
     // 통계 (디버그 / Grafana용)
     public int TotalChecked { get; private set; }
     public int TotalRejected { get; private set; }
+
+    /// <summary>고갈됐지만 지속 기준 미달이라 기록하지 않은 횟수. 튜닝 확인용.</summary>
+    public int TransientDrops { get; private set; }
 
     public MovementValidator(float now)
     {
@@ -102,6 +161,7 @@ public class MovementValidator
         _spawnTime = now;
         _tokens = VMove.BucketCapacity;
         _lastRefillTime = now;
+        _drainStartTime = -1f;
     }
 
     /// <summary>
@@ -166,10 +226,26 @@ public class MovementValidator
         if (_tokens < 1f)
         {
             _tokens = 0f;
-            if (!inGrace) { TotalRejected++; return MoveRejectReason.RateExceeded; }
+
+            // 고갈이 시작된 시각을 기록한다.
+            if (_drainStartTime < 0f) _drainStartTime = now;
+
+            bool sustained = (now - _drainStartTime) >= VMove.SustainedDrainSec;
+
+            if (!inGrace && sustained)
+            {
+                TotalRejected++;
+                return MoveRejectReason.RateExceeded;
+            }
+
+            // 순간 고갈. 차단은 하되 기록하지 않는다.
+            // 네트워크 히컵으로 밀린 입력이 몰려 도착한 경우가 여기다.
+            TransientDrops++;
             return MoveRejectReason.None;
         }
+
         _tokens -= 1f;
+        _drainStartTime = -1f;      // 회복
 
         // --- 3) 틱 검사 ---
         // 같은 틱을 다시 보내면 서버가 cc.Move()를 두 번 적용해
@@ -193,6 +269,10 @@ public class MovementValidator
 
     /// <summary>남은 토큰. 0에 가까울수록 수신율이 높다는 뜻이다.</summary>
     public float Tokens => _tokens;
+
+    /// <summary>현재 연속 고갈 시간(초). 0이면 고갈 상태가 아니다.</summary>
+    public float DrainSeconds(float now)
+        => _drainStartTime < 0f ? 0f : now - _drainStartTime;
 
     private static bool IsFinite(float v)
         => !float.IsNaN(v) && !float.IsInfinity(v);

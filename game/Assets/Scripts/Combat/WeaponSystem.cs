@@ -16,7 +16,9 @@
 //  ─────────────────────────────────────────────────────────────────
 //  W7 Day 1 : 레이어 분리로 랙 보상 복구, V-FIRE-01 토큰 버킷
 //  W7 Day 3 : 조준 오차 / 표적 식별 / V-LOS BlockedHit
-//  W7 Day 4 : spot_event_id 기록, V-TIME-01 배선  ← 이번 변경
+//  W7 Day 4 : spot_event_id 기록, V-TIME-01 배선
+//  W7 Day 5 : shotIndex 를 V-TIME-01 에 전달  ← 이번 변경
+//             + OnClientFired 이벤트 (사운드/이펙트용)
 //
 //  aim_error_deg 를 발사 시점에 계산하는 이유
 //   20Hz 가시성 루프에서 가져오면 최대 50ms 묵은 값이라 플릭 사격에서
@@ -35,7 +37,11 @@
 //   이 발사가 어느 SPOT 에서 이어진 것인지 이어 준다. 반응시간은
 //   SQL 에서 유도한다: fire.server_time - spot.server_time - rtt_ms/2
 //   연사 후속탄에도 같은 id 가 붙으므로 분석 시 SPOT 당 최초 발사만
-//   취해야 한다. 서버 판정(V-TIME-01)은 이미 최초 1발만 잰다.
+//   취해야 한다.
+//
+//   ※ 조인은 반드시 (match_id, spot_event_id) 복합키로 한다.
+//     spot_event_id 는 서버 프로세스 스코프라 재시작하면 1부터
+//     다시 시작하며, 단독 조인은 세션 간 오염을 만든다.
 //
 //  V-LOS-01 / BlockedHit
 //   되감은 월드에서 벽이 더 가까우면 히트가 성립하지 않으므로
@@ -155,6 +161,7 @@ public class WeaponSystem : NetworkBehaviour
 
         _clientLastFireTick = tick;
         Vector2 recoil = WeaponConfig.GetRecoil(_clientShotIndex);
+        OnClientFired?.Invoke(_clientShotIndex);   // 증가 전 = 이번 발의 인덱스
         _clientShotIndex++;
         return recoil;
     }
@@ -295,7 +302,9 @@ public class WeaponSystem : NetworkBehaviour
         }
 
         // --- V-TIME-01 : 반응시간 ---
-        long spotId = ResolveSpotAndCheckReaction(aimTarget, nowRt, rttMs, input.tick);
+        // ★ W7 Day 5 ★ shotIndex 를 넘긴다. 연사 도중 발사는 반응이 아니다.
+        long spotId = ResolveSpotAndCheckReaction(
+            aimTarget, nowRt, rttMs, input.tick, shotIndex);
 
         // 명중이면 실제 피탄 거리, 빗나갔으면 표적까지의 거리.
         float reportDist = hit ? hitDist : aimDist;
@@ -313,12 +322,22 @@ public class WeaponSystem : NetworkBehaviour
     /// <summary>
     /// 이 발사가 어느 SPOT 에서 이어진 것인지 찾고, 필요하면 V-TIME-01 을 기록한다.
     ///
-    /// SPOT 하나당 최초 1발만 잰다. 연사 중 매 발을 재면 두 번째부터
-    /// 점점 커지는 무의미한 값이 분포에 쌓인다.
+    /// SPOT 하나당 최초 1발만 잰다. 여기에 더해 W7 Day 5 실측 결과로
+    /// 두 게이트가 추가됐다 (ReactionTimeValidator 참조).
+    ///
+    ///   - shotIndex > 0  : 트리거를 이미 당기고 있었으므로 반응이 아니다.
+    ///                      정상 플레이 오탐 13건 중 10건이 이 경우였다
+    ///                      (shot_index 15, 19, 13, 10, 9, 8 ...).
+    ///   - 3초 내 재발사   : 교전 중이던 상대의 재등장은 첫 조우가 아니다.
+    ///                      나머지 3건이 이 경우였다.
+    ///
+    /// spotId 는 게이트에 걸려도 그대로 반환한다. 텔레메트리에는 남겨
+    /// SQL 로 사후 분석할 수 있어야 하기 때문이다. 서버 판정과 오프라인
+    /// 분석의 기준을 다르게 두는 것이 의도된 설계다.
     /// </summary>
     /// <returns>이어진 SPOT id. 없으면 0.</returns>
     private long ResolveSpotAndCheckReaction(
-        PlayerRewind aimTarget, float nowRt, int rttMs, int clientTick)
+        PlayerRewind aimTarget, float nowRt, int rttMs, int clientTick, int shotIndex)
     {
         if (aimTarget == null) return 0;
 
@@ -330,7 +349,7 @@ public class WeaponSystem : NetworkBehaviour
             return 0;
 
         if (_reaction != null &&
-            _reaction.TryMeasure(targetId, spotId, nowRt, spotTime, rttMs,
+            _reaction.TryMeasure(targetId, spotId, shotIndex, nowRt, spotTime, rttMs,
                                  out int adjustedMs, out int fastCount) &&
             ReactionTimeValidator.IsImpossible(adjustedMs))
         {
@@ -427,6 +446,15 @@ public class WeaponSystem : NetworkBehaviour
 
     /// <summary>UI 가 구독한다. (headshot, killed)</summary>
     public event System.Action<bool, bool> OnHitConfirmed;
+
+    /// <summary>
+    /// 소유 클라이언트에서 발사가 성립한 순간. 인자는 이번 발의 shotIndex.
+    /// 사운드·이펙트가 구독한다. 순수 클라이언트 표현이므로 서버 판정과 무관하다.
+    ///
+    /// ClientTryFire 의 반환값(반동 벡터)으로 발사를 감지하면 안 된다.
+    /// 패턴 첫 발이 (0,0)이면 발사했는데도 zero 가 나온다.
+    /// </summary>
+    public event System.Action<int> OnClientFired;
 
     // -----------------------------------------------------------------
     //  텔레메트리

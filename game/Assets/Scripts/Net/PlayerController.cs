@@ -10,7 +10,7 @@
 //   (2) VisibilitySystem 등록/해제
 //   (3) V-MOVE 위반 기록에 서버 측정 RTT 를 넣는다 (기존 -1)
 //
-//  W7 Day 5 변경  ← 이번
+//  W7 Day 5 변경
 //   (4) 연사핵 / 트리거봇 하네스 배선
 //
 //       두 치트 모두 기존 입력 경로로만 공격한다. 서버가 관측하는 것은
@@ -25,6 +25,22 @@
 //
 //       트리거봇: 조준선에 적이 걸리면 그 프레임에 발사 비트를 켠다.
 //               SPOT 직후 인간 하한 미만의 반응으로 관측된다.
+//
+//  W7.5 변경  ← 이번
+//   (5) 지면 판정을 바닥 상면 기준으로 재정의
+//
+//       기존 GROUND_Y = 0 은 이름과 달리 "바닥 상면"이 아니라
+//       "캡슐 중심이 지면에 닿는 Transform.y" 였다. 프로토타입 맵의
+//       바닥 상면이 y = -1 이고 Height 2 / Center (0,0,0) 이었기에
+//       우연히 두 값이 같았을 뿐이다.
+//
+//       측정맵은 바닥 상면이 y = 0 이라 1m 어긋났고, 캐릭터가 절반
+//       묻힌 채 클램프되었다. 이제 바닥 상면만 상수로 두고 나머지는
+//       CharacterController 치수에서 유도한다. 맵 바닥 높이나 CC 치수가
+//       바뀌어도 한 곳만 고치면 된다.
+//
+//       ※ 히트박스(Body h1.6 r0.5 / Head r0.25)는 건드리지 않았다.
+//         W7 측정 유효성 유지.
 // =====================================================================
 
 using Unity.Netcode;
@@ -56,23 +72,48 @@ public class PlayerController : NetworkBehaviour
     [Header("Reconciliation")]
     [SerializeField] private float reconcileThreshold = 0.05f;   // 5cm
 
-    // --- 지면 판정 ---
-    // 평평한 지형 1개 전제. 바닥 표면 y = -1, CharacterController Height=2/Center=(0,0,0)
-    // 이므로 캡슐 중심(Transform.y)이 0일 때 지면에 닿는 것이 이론값이다.
+    // -----------------------------------------------------------------
+    //  지면 판정  (W7.5 재정의)
+    // -----------------------------------------------------------------
     //
-    // CharacterController.isGrounded는 Move() 호출 결과에 의존해 replay 시 값이
-    // 달라질 수 있으므로 쓰지 않는다 (결정론 유지).
-    private const float GROUND_Y = 0f;
-    private const float GROUND_EPSILON = 0.05f;
+    //  평평한 지형 1개 전제. 여기에는 "맵 바닥의 윗면 월드 Y" 만 적는다.
+    //  캐릭터가 실제로 멈추는 Transform.y 는 CharacterController 치수에서
+    //  유도한다 (RestY 참조).
+    //
+    //  측정맵(__MAP_W7)의 Ground 는 중심 y = -0.5, 두께 1 이므로 윗면이 0.
+    //  프로토타입 맵을 다시 쓸 경우에만 이 값을 되돌린다.
+    //
+    //  CharacterController.isGrounded 는 Move() 호출 결과에 의존해 replay 시
+    //  값이 달라질 수 있으므로 쓰지 않는다 (결정론 유지).
+    //
+    private const float FLOOR_SURFACE_Y = 0f;
+    // skinWidth(0.08)보다 커야 한다.
+    // 작으면 CC의 실제 안착 위치가 RestY 예측과 어긋나는 순간
+    // verticalVelocity가 발산하고 점프가 영구히 죽는다.
+    // 평지 단일 지형이라 20cm 허용해도 실질 부작용이 없다.
+    private const float GROUND_EPSILON = 0.20f;
 
     /// <summary>
-    /// 실제로 캐릭터가 정지하는 높이.
-    /// CharacterController는 skinWidth(기본 0.08)만큼 접촉면 위에 뜬 채로 멈춘다.
-    /// 이 값을 계산에 넣지 않으면 캐릭터가 영원히 공중으로 판정되어
-    /// verticalVelocity가 무한히 발산하고 점프가 작동하지 않는다.
-    /// skinWidth는 프리팹 직렬화 값이라 클라/서버가 동일하므로 결정론에 안전하다.
+    /// 실제로 캐릭터가 정지하는 Transform.y.
+    ///
+    ///   캡슐 바닥(월드) = transform.y + cc.center.y - cc.height/2
+    ///
+    /// CharacterController 는 접촉면 위 skinWidth 만큼 띄운 채 멈추므로
+    ///   캡슐 바닥 = FLOOR_SURFACE_Y + skinWidth
+    /// 로 두고 transform.y 를 역산한다.
+    ///
+    /// skinWidth 를 빼먹으면 캐릭터가 영원히 공중으로 판정되어
+    /// verticalVelocity 가 무한히 발산하고 점프가 작동하지 않는다 (W6 버그).
+    ///
+    /// height / center / skinWidth 는 모두 프리팹 직렬화 값이라
+    /// 클라·서버가 동일하다. 결정론에 안전하다.
+    ///
+    /// 현재 값 = 0 + 0.08 + 1.0 - 0 = 1.08
     /// </summary>
-    private float RestY => GROUND_Y + cc.skinWidth;
+    private float RestY => FLOOR_SURFACE_Y + cc.skinWidth + cc.height * 0.5f - cc.center.y;
+
+    /// <summary>스폰/리스폰 좌표를 만들 때 쓰는 안착 높이. 외부 공개용.</summary>
+    public float SpawnRestY => RestY;
 
     // --- 입력 비트 마스크 (InputPayload.buttons) ---
     private const byte BTN_JUMP = 1 << 0;
@@ -144,7 +185,7 @@ public class PlayerController : NetworkBehaviour
     public override void OnNetworkSpawn()
     {
         bool mine = IsOwner;
-        Debug.Log($"[SPAWN] OwnerClientId={OwnerClientId} IsOwner={mine} IsServer={IsServer} pos={transform.position}");
+        Debug.Log($"[SPAWN] OwnerClientId={OwnerClientId} IsOwner={mine} IsServer={IsServer} pos={transform.position} restY={RestY:F3}");
         if (cam) cam.gameObject.SetActive(mine);
         if (audioListener) audioListener.enabled = mine;
 
@@ -162,6 +203,19 @@ public class PlayerController : NetworkBehaviour
 
             serverAimYaw = transform.eulerAngles.y;
             serverAimPitch = 0f;
+
+            // 스폰 위치가 바닥에 묻힌 채로 시작하지 않도록 한 번 보정한다.
+            // 스폰 마커 Y 가 틀려도 첫 틱부터 정상 안착 상태가 된다.
+            if (transform.position.y < RestY)
+            {
+                Vector3 p = transform.position;
+                p.y = RestY;
+                cc.enabled = false;
+                transform.position = p;
+                cc.enabled = true;
+                verticalVelocity = 0f;
+                Debug.Log($"[SPAWN] 안착 보정 → y={RestY:F3}");
+            }
 
             VisibilitySystem.EnsureExists();
             VisibilitySystem.Instance.Register(this);
@@ -419,7 +473,7 @@ public class PlayerController : NetworkBehaviour
         cc.Move(motion * dt);
 
         // 바닥을 뚫고 내려가지 않도록 보정 (평평한 지형 전제).
-        // 복원 높이는 GROUND_Y가 아니라 RestY다. GROUND_Y로 되돌리면
+        // 복원 높이는 바닥 상면이 아니라 RestY다. 바닥 상면으로 되돌리면
         // CharacterController가 다음 틱에 skinWidth만큼 밀어올려 진동한다.
         if (transform.position.y < RestY)
         {
@@ -484,7 +538,21 @@ public class PlayerController : NetworkBehaviour
                     severity: 2,
                     detail: reason.ToString(),
                     rttMs: rttMs);
+
+
+                // ★ W7 Day 5 ★ 거부돼도 타임라인은 전진시킨다.
+                if (input.tick > lastProcessedTick) lastProcessedTick = input.tick;
+
                 return;
+                /* ★ W7 Day 5 ★ 거부돼도 타임라인은 전진시킨다.
+                // 갱신하지 않으면 lastProcessedTick 이 멈춰, 이후의
+                // 정상 입력까지 전부 TickReplay 로 분류된다.
+                // 치트 1회가 수백 건으로 증폭되는 원인. (V-FIRE 와 동일 구조)
+                //
+                // 이동은 여전히 적용되지 않으므로 처벌 효과는 유지된다.
+                if (input.tick > lastProcessedTick) lastProcessedTick = input.tick;
+
+                return;*/
             }
         }
 
@@ -548,10 +616,16 @@ public class PlayerController : NetworkBehaviour
         }
     }
 
-    /// <summary>서버가 권위적으로 위치를 이동시킨다 (스폰, 리스폰 등).</summary>
+    /// <summary>
+    /// 서버가 권위적으로 위치를 이동시킨다 (스폰, 리스폰 등).
+    /// 전달된 Y 가 안착 높이보다 낮으면 RestY 로 올려붙인다.
+    /// 스폰 마커 Y 가 틀려도 캐릭터가 바닥에 묻히지 않는다.
+    /// </summary>
     public void ServerTeleport(Vector3 position)
     {
         if (!IsServer) return;
+
+        if (position.y < RestY) position.y = RestY;
 
         cc.enabled = false;
         transform.position = position;

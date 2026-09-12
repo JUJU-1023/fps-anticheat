@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 7a098c3fed939d4478763bc6b1b372f2
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 2100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 182512
+  packageName: M16 A1 Rifle
+  packageVersion: 1.0
+  assetPath: Assets/M16 A1/Materials/Mat_Rifle_Caliber_5_56_1.mat
+  uploadId: 399451

@@ -6,8 +6,7 @@ public static class BuildScript
 {
     static string[] Scenes => new[]
     {
-        "Assets/Scenes/Bootstrap.unity",
-        "Assets/Scenes/Arena.unity"
+        "Assets/Scenes/Bootstrap.unity"
     };
 
     [MenuItem("Build/Linux Server x86_64")]
