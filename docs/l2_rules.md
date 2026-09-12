@@ -565,3 +565,74 @@ V-TIME-01 의 WindowSize / RepeatLimit 와 같은 구조.
 rapidfire 처럼 틱을 부풀리는 치트 세션에서는 이 방법이 깨진다.
 치트 측정에는 새로 추가한 `fire_gap_ticks` / `fire_gap_ms` 를 쓴다.
 서버가 그 순간 직접 잰 값이라 가정이 필요 없다.
+
+
+## V-RECOIL-01 노리코일 탐지 (W8 Day 2)
+
+통계량  버스트 내 연속 20발의 comp 표본 표준편차
+        comp = (pitch[n] - pitch[n-1]) + GetRecoil(n).y
+임계    comp_sd < 0.3 → 위반 (잠정)
+
+### 실측
+
+| 매치 | 라벨 | 발수 | comp_mean | comp_sd |
+|---|---|---|---|---|
+| 63 | clean | 579 | 1.089 | 0.850 |
+| 64 | clean | 785 | 1.084 | 0.870 |
+| 65 | cheat | 600 | 1.097 | **0.096** |
+
+match 62(mixed)의 노리코일 구간은 sd 0.250~0.290.
+match 57(clean)은 player 1 이 1.124, player 19 가 2.153.
+
+### 핵심
+
+comp_mean 이 세 매치 모두 1.08~1.10 으로 동일하다.
+잘하는 플레이어는 반동을 거의 전부 상쇄하므로 평균으로는
+노리코일과 구분되지 않는다. 구분되는 것은 편차다.
+사람은 손으로 따라가느라 흔들리고 핵은 기계적으로 정확하다.
+
+comp_min 도 보조 지표가 될 수 있다.
+정상은 음수가 나오지만(-0.30 / -0.20) 노리코일은 최소 0.30 으로
+음수가 한 번도 없다. 반동을 상쇄할 필요가 없기 때문이다.
+현재는 comp_sd 만으로 충분히 갈리므로 쓰지 않는다.
+
+### 임계 근거
+
+정상 하한 0.850 / 노리코일 상한 0.290.
+임계 0.3 이면 양쪽으로 2.8배 및 3배 여유.
+0.5 는 정상 하한과 1.7배 차이뿐이라 위험하다.
+
+### 한계
+
+63~65 는 모두 동일 플레이어 1명이다. 개인차가 반영되지 않았다.
+정상 하한 0.850 은 잠정값이며 다른 플레이어로 검증해야 한다.
+match 57 기준 개인차는 최대 2.5배(1.124 vs 2.153).
+
+### 재현 쿼리
+
+```sql
+WITH s AS (
+  SELECT
+    match_id, player_id, client_tick, shot_index, pitch,
+    LAG(client_tick) OVER (PARTITION BY match_id, player_id ORDER BY client_tick, id) AS prev_tick,
+    LAG(pitch)       OVER (PARTITION BY match_id, player_id ORDER BY client_tick, id) AS prev_pitch
+  FROM combat_events
+  WHERE match_id IN (?, ?)
+    AND event_type IN ('FIRE','HIT','KILL')
+)
+SELECT match_id, player_id, COUNT(*) AS n,
+       ROUND(AVG(comp), 3) AS comp_mean,
+       ROUND(STDDEV_SAMP(comp), 3) AS comp_sd
+FROM (
+  SELECT match_id, player_id,
+         (pitch - prev_pitch) + (0.4 + 0.7 * LEAST(shot_index / 8.0, 1.0)) AS comp
+  FROM s
+  WHERE prev_tick IS NOT NULL
+    AND client_tick - prev_tick <= 21
+    AND shot_index > 0
+) t
+GROUP BY match_id, player_id;
+```
+
+측정 절차: 세션마다 게임 서버를 재시작해야 match_uid 가 새로 발급된다.
+클라이언트만 재접속하면 같은 매치에 계속 쌓인다(match 62 가 그 사례).
