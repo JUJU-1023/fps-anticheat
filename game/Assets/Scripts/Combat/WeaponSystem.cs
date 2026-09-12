@@ -18,10 +18,26 @@
 //  W7 Day 3 : 조준 오차 / 표적 식별 / V-LOS BlockedHit
 //  W7 Day 4 : spot_event_id 기록, V-TIME-01 배선
 //  W7 Day 5 : shotIndex 를 V-TIME-01 에 전달, OnClientFired 이벤트
-//  W8  Day 1 : 반동 인덱스 축 불일치 계측 + 발사 경로 카운터  ← 이번 변경
+//  W8 Day 1 : 반동 인덱스 축 불일치 계측 + 발사 경로 카운터
+//  W8 Day 2 : V-RECOIL-01 배선  ← 이번 변경
 //
 //  ─────────────────────────────────────────────────────────────────
-//  ★ W8 : 왜 fire_gap_ticks 와 fire_gap_ms 를 둘 다 남기는가 ★
+//  ★ W8 Day 2 : V-RECOIL-01 ★
+//
+//   노리코일 탐지를 ServerProcessInput 에 붙인다. FireHitscan 이 아니라
+//   여기인 이유는 이 지표가 조준각만 쓰기 때문이다. 되감기도 표적도
+//   필요 없으므로 히트스캔 경로를 건드리지 않는다.
+//
+//   판정에 필요한 세 값이 이 시점에 다 있다.
+//     shotIndex       서버가 센 연사 인덱스
+//     input.pitch     반동이 이미 반영된 조준각
+//     reportGapTicks  직전 승인 발사와의 클라 틱 차 (W8 Day 1 에 추가)
+//
+//   차단은 하지 않는다. 관리자가 대시보드를 보고 판단한다(B안).
+//   지표 정의와 임계 근거는 RecoilValidator.cs 참조.
+//
+//  ─────────────────────────────────────────────────────────────────
+//  ★ W8 Day 1 : 왜 fire_gap_ticks 와 fire_gap_ms 를 둘 다 남기는가 ★
 //
 //   연사 중단(= 반동 인덱스 리셋) 판정 기준이 클라와 서버에서 다르다.
 //
@@ -34,23 +50,16 @@
 //   점프시켜 매 발을 shotIndex=0 으로 만들 수 있고, expected_recoil_pitch
 //   가 항상 0 이 되어 노리코일 탐지가 비교할 기준선을 잃는다.
 //
-//   대가는 두 축이 갈라질 수 있다는 것이다. RTT 지터나 패킷 지연으로
-//   서버 실시간 간격만 임계를 넘으면, 서버는 인덱스를 리셋했는데 클라는
-//   안 한 상태가 된다. 그러면 클라가 실제 화면에 적용한 반동과 서버가
-//   기대하는 expected_recoil_pitch 가 어긋난다.
+//   대가는 두 축이 갈라질 수 있다는 것이다. 실측 불일치율은 발사 기준
+//   0.28%, 버스트 기준 1.4% 였다(match 57). 8발 연사의 누적 세로 반동이
+//   5.65도이므로 이 수준은 신호를 덮지 않는다.
 //
-//   노리코일 탐지는 이 둘의 차이를 보는 것이므로, 정상 플레이에서
-//   차이가 생기면 탐지 자체가 성립하지 않는다. W8 반동 설계에 들어가기
-//   전에 불일치율을 실측해야 한다. 그래서 두 축의 간격을 그대로 남긴다.
-//
-//   판정은 SQL 에서 한다. 서버가 미리 "불일치"로 접어서 저장하지 않는
-//   이유는 RecoilResetTicks 를 나중에 조정할 때 과거 데이터를 다시
-//   해석할 수 있어야 하기 때문이다.
-//
-//   두 값 모두 첫 발에서는 기준이 없으므로 null 이다.
+//   판정은 SQL 에서 한다. 서버가 미리 접어서 저장하지 않는 이유는
+//   RecoilResetTicks 를 조정할 때 과거 데이터를 다시 해석할 수 있어야
+//   하기 때문이다. 두 값 모두 첫 발에서는 기준이 없으므로 null 이다.
 //
 //  ─────────────────────────────────────────────────────────────────
-//  ★ W8 : 발사 경로 카운터 ★
+//  ★ W8 Day 1 : 발사 경로 카운터 ★
 //
 //   거부된 발사는 combat_events 에 아무 행도 남기지 않는다. 특히
 //   FireRejectReason.None 으로 거부되는 경로는 ViolationLogger 에도
@@ -62,6 +71,12 @@
 //
 //   행을 더 만들지 않고 카운터로 세서 리스폰·디스폰 시 로그로 남긴다.
 //   Promtail → Loki 로 들어가므로 스키마 변경 없이 조회된다.
+//
+//   ※ FireIntervalTicks=6 은 초당 10발이고 V-FIRE 토큰 버킷 충전도
+//     10/s 다. 헤드룸이 0이라 V-MOVE 에서 겪은 연쇄 구조와 같다.
+//     capacity 4 로 버티는 중이므로 violationRejected 값을 보고
+//     충전율 상향을 판단한다. 올리면 rapidfire 탐지 임계도 같이
+//     올라가는 트레이드오프가 있다.
 //
 //  ─────────────────────────────────────────────────────────────────
 //  aim_error_deg 를 발사 시점에 계산하는 이유
@@ -120,7 +135,7 @@ public class WeaponSystem : NetworkBehaviour
     private float _lastFireRealtime = -999f;
     private int _shotIndex = 0;      // 연사 중 몇 번째 발인지 (반동 인덱스)
 
-    // --- 서버 발사 경로 카운터 (W8) ---
+    // --- 서버 발사 경로 카운터 (W8 Day 1) ---
     // 거부된 발사는 combat_events 에 남지 않으므로 여기서 센다.
     private int _fireAccepted;
     private int _fireGateRejected;       // 게임플레이 발사 간격 게이트
@@ -129,6 +144,7 @@ public class WeaponSystem : NetworkBehaviour
 
     private FireRateValidator _fireValidator;
     private ReactionTimeValidator _reaction;
+    private RecoilValidator _recoil;
 
     // --- 클라 상태 (반동 체감용) ---
     private int _clientLastFireTick = -1000;
@@ -162,15 +178,16 @@ public class WeaponSystem : NetworkBehaviour
             _fireValidator = new FireRateValidator(
                 Time.realtimeSinceStartup, WeaponConfig.FireIntervalTicks);
             _reaction = new ReactionTimeValidator();
+            _recoil = new RecoilValidator();
         }
     }
 
     /// <summary>
     /// 세션 최종 계측을 남긴다.
     ///
-    /// V-TIME 은 위반 건수만으로는 해석할 수 없다. 측정 자체가 몇 번
-    /// 일어났는지(분모)를 모르면 "위반 1건"이 오탐률 0.5% 인지 33% 인지
-    /// 구분되지 않는다. 발사 경로 카운터도 같은 이유다.
+    /// 위반 건수만으로는 해석할 수 없다. 측정이 몇 번 일어났는지(분모)를
+    /// 모르면 "위반 1건"이 오탐률 0.5% 인지 33% 인지 구분되지 않는다.
+    /// V-TIME 에서 이걸로 한 번 데였다.
     /// </summary>
     public override void OnNetworkDespawn()
     {
@@ -179,6 +196,8 @@ public class WeaponSystem : NetworkBehaviour
             Debug.Log($"[FIRE] final uid={PlayerUid} {FireStatsLine()}");
             if (_reaction != null)
                 Debug.Log($"[VTIME] final uid={PlayerUid} {_reaction.StatsLine()}");
+            if (_recoil != null)
+                Debug.Log($"[VRECOIL] final uid={PlayerUid} {_recoil.StatsLine()}");
         }
 
         base.OnNetworkDespawn();
@@ -224,7 +243,7 @@ public class WeaponSystem : NetworkBehaviour
     /// 이 값이 조작되면 서버 계산과 어긋난다.
     ///
     /// ※ 여기의 리셋은 클라 틱 축이고 서버는 실시간 축이다. 두 축의
-    ///   불일치가 W8 노리코일 탐지의 오차 바닥이 된다. 파일 상단 참조.
+    ///   불일치가 V-RECOIL-01 의 오차 바닥이 된다. 파일 상단 참조.
     /// </summary>
     public Vector2 ClientTryFire(int tick, bool firePressed)
     {
@@ -256,7 +275,7 @@ public class WeaponSystem : NetworkBehaviour
 
         float now = Time.realtimeSinceStartup;
 
-        // --- 두 축의 간격을 리셋 판정 이전에 붙잡는다 (W8 계측) ---
+        // --- 두 축의 간격을 리셋 판정 이전에 붙잡는다 (W8 Day 1 계측) ---
         // 첫 발은 기준이 없으므로 -1 로 두고 텔레메트리에서 null 로 나간다.
         int gapTicks = input.tick - _lastFireTick;
         int reportGapTicks = _lastFireTick < 0 ? -1 : gapTicks;
@@ -267,7 +286,7 @@ public class WeaponSystem : NetworkBehaviour
         // --- 연사 중단 판정 (서버 실시간 기준) ---
         // 클라 틱으로 판정하면 틱을 크게 점프시켜 매 발을 shotIndex=0 으로
         // 만들 수 있고, expected_recoil_pitch 가 항상 0 이 되어
-        // W8 노리코일 탐지가 비교할 기준선을 잃는다.
+        // V-RECOIL-01 이 비교할 기준선을 잃는다.
         if (now - _lastFireRealtime > WeaponConfig.RecoilResetTicks / VFire.TickRate)
             _shotIndex = 0;
 
@@ -305,6 +324,26 @@ public class WeaponSystem : NetworkBehaviour
         int shotIndex = _shotIndex;
         _shotIndex++;
 
+        // --- V-RECOIL-01 : 노리코일 ---
+        // 조준각만 쓰므로 되감기 이전에 판정한다. 히트스캔 경로와 무관하다.
+        // 창 20발이 차야 평가하며, 한 번 걸린 뒤에는 편차가 회복될 때까지
+        // 다시 보고하지 않는다(히스테리시스).
+        if (_recoil != null &&
+            _recoil.TryEvaluate(shotIndex, input.pitch, reportGapTicks, out float sd))
+        {
+            Debug.Log($"[VRECOIL] 위반 uid={PlayerUid} sd={sd:F3} " +
+                      $"shotIndex={shotIndex} tick={input.tick}");
+
+            ViolationLogger.Report(
+                clientId: OwnerClientId,
+                playerUid: PlayerUid,
+                code: VRecoil.CODE,
+                tick: input.tick,
+                severity: VRecoil.Severity,
+                detail: "FlatRecoilResidual",
+                rttMs: rttMs);
+        }
+
         FireHitscan(input, serverTick, rttMs, shotIndex, reportGapTicks, reportGapMs);
     }
 
@@ -323,6 +362,14 @@ public class WeaponSystem : NetworkBehaviour
         {
             Debug.Log($"[VTIME] respawn uid={PlayerUid} {_reaction.StatsLine()}");
             _reaction.ResetForRespawn();
+        }
+
+        // 리스폰은 조준각의 불연속점이다. 창과 기준 pitch 만 버리고
+        // 누적 계측은 유지한다.
+        if (_recoil != null)
+        {
+            Debug.Log($"[VRECOIL] respawn uid={PlayerUid} {_recoil.StatsLine()}");
+            _recoil.ResetForRespawn();
         }
 
         _shotIndex = 0;
@@ -578,8 +625,12 @@ public class WeaponSystem : NetworkBehaviour
         var w = TelemetryWriter.Instance;
         if (w == null || !w.IsActive) return;
 
-        // 이 시점의 이론적 반동 누적. 실제 조준각과의 차이가
-        // W8 노리코일 탐지의 입력이 된다.
+        // 이 시점의 이론적 반동 누적.
+        //
+        // ※ 이 값은 0~shotIndex-1 의 누적이고, input.pitch 에는 이미
+        //   GetRecoil(shotIndex) 가 반영돼 있다. 두 값을 그대로 차분하면
+        //   한 칸 어긋나므로, 분석 쿼리는 shot_index 에서 반동을 직접
+        //   유도해야 한다. RecoilValidator 가 서버에서 하는 계산과 같다.
         Vector2 expected = WeaponConfig.GetAccumulatedRecoil(shotIndex);
 
         string type = killed ? "KILL" : (hit ? "HIT" : "FIRE");
