@@ -19,7 +19,7 @@
 //  W7 Day 4 : spot_event_id 기록, V-TIME-01 배선
 //  W7 Day 5 : shotIndex 를 V-TIME-01 에 전달, OnClientFired 이벤트
 //  W8 Day 1 : 반동 인덱스 축 불일치 계측 + 발사 경로 카운터
-//  W8 Day 2 : V-RECOIL-01 배선  ← 이번 변경
+//  W8 Day 2 : V-RECOIL-01 배선 (고정 빈도 지표)  ← 이번 변경
 //
 //  ─────────────────────────────────────────────────────────────────
 //  ★ W8 Day 2 : V-RECOIL-01 ★
@@ -33,8 +33,15 @@
 //     input.pitch     반동이 이미 반영된 조준각
 //     reportGapTicks  직전 승인 발사와의 클라 틱 차 (W8 Day 1 에 추가)
 //
+//   지표는 "두 발 사이에 조준점이 전혀 안 움직인 비율"이다.
+//   창 40발 중 24발(60%) 이상이면 보고한다.
+//   실측 정상 4.6~9.0% / 노리코일 64.8~93.3%.
+//
+//   ※ 1차 설계였던 표본 표준편차는 조준을 유지한 노리코일에서
+//     무너졌다(match 72). 실패 기록과 임계 근거는
+//     RecoilValidator.cs 상단 참조.
+//
 //   차단은 하지 않는다. 관리자가 대시보드를 보고 판단한다(B안).
-//   지표 정의와 임계 근거는 RecoilValidator.cs 참조.
 //
 //  ─────────────────────────────────────────────────────────────────
 //  ★ W8 Day 1 : 왜 fire_gap_ticks 와 fire_gap_ms 를 둘 다 남기는가 ★
@@ -47,12 +54,11 @@
 //                             → 서버 실시간 축
 //
 //   서버가 실시간을 쓰는 것은 의도된 설계다. 틱으로 판정하면 틱을 크게
-//   점프시켜 매 발을 shotIndex=0 으로 만들 수 있고, expected_recoil_pitch
-//   가 항상 0 이 되어 노리코일 탐지가 비교할 기준선을 잃는다.
+//   점프시켜 매 발을 shotIndex=0 으로 만들 수 있고, V-RECOIL-01 이
+//   램프 구간만 보게 되어 판정 표본을 전부 잃는다.
 //
 //   대가는 두 축이 갈라질 수 있다는 것이다. 실측 불일치율은 발사 기준
-//   0.28%, 버스트 기준 1.4% 였다(match 57). 8발 연사의 누적 세로 반동이
-//   5.65도이므로 이 수준은 신호를 덮지 않는다.
+//   0.28%, 버스트 기준 1.4% 였다(match 57).
 //
 //   판정은 SQL 에서 한다. 서버가 미리 접어서 저장하지 않는 이유는
 //   RecoilResetTicks 를 조정할 때 과거 데이터를 다시 해석할 수 있어야
@@ -242,8 +248,8 @@ public class WeaponSystem : NetworkBehaviour
     /// 반동만큼 시야를 밀어 올린다. 서버도 같은 패턴을 알고 있으므로
     /// 이 값이 조작되면 서버 계산과 어긋난다.
     ///
-    /// ※ 여기의 리셋은 클라 틱 축이고 서버는 실시간 축이다. 두 축의
-    ///   불일치가 V-RECOIL-01 의 오차 바닥이 된다. 파일 상단 참조.
+    /// ※ 여기의 리셋은 클라 틱 축이고 서버는 실시간 축이다.
+    ///   불일치율은 실측 0.28%(발사 기준). 파일 상단 참조.
     /// </summary>
     public Vector2 ClientTryFire(int tick, bool firePressed)
     {
@@ -285,8 +291,8 @@ public class WeaponSystem : NetworkBehaviour
 
         // --- 연사 중단 판정 (서버 실시간 기준) ---
         // 클라 틱으로 판정하면 틱을 크게 점프시켜 매 발을 shotIndex=0 으로
-        // 만들 수 있고, expected_recoil_pitch 가 항상 0 이 되어
-        // V-RECOIL-01 이 비교할 기준선을 잃는다.
+        // 만들 수 있고, V-RECOIL-01 이 램프 구간만 보게 되어 판정 표본을
+        // 전부 잃는다.
         if (now - _lastFireRealtime > WeaponConfig.RecoilResetTicks / VFire.TickRate)
             _shotIndex = 0;
 
@@ -326,12 +332,14 @@ public class WeaponSystem : NetworkBehaviour
 
         // --- V-RECOIL-01 : 노리코일 ---
         // 조준각만 쓰므로 되감기 이전에 판정한다. 히트스캔 경로와 무관하다.
-        // 창 20발이 차야 평가하며, 한 번 걸린 뒤에는 편차가 회복될 때까지
-        // 다시 보고하지 않는다(히스테리시스).
+        // 램프 구간(shotIndex < RecoilRampShots)은 표본에서 제외되고,
+        // 창 40발이 차야 평가한다. 한 번 걸린 뒤에는 고정 수가 회복될
+        // 때까지 다시 보고하지 않는다(히스테리시스).
         if (_recoil != null &&
-            _recoil.TryEvaluate(shotIndex, input.pitch, reportGapTicks, out float sd))
+            _recoil.TryEvaluate(shotIndex, input.pitch, reportGapTicks, out float ratio))
         {
-            Debug.Log($"[VRECOIL] 위반 uid={PlayerUid} sd={sd:F3} " +
+            Debug.Log($"[VRECOIL] 위반 uid={PlayerUid} ratio={ratio:F3} " +
+                      $"고정={_recoil.CurrentFrozen}/{_recoil.CurrentWindow} " +
                       $"shotIndex={shotIndex} tick={input.tick}");
 
             ViolationLogger.Report(
@@ -340,7 +348,7 @@ public class WeaponSystem : NetworkBehaviour
                 code: VRecoil.CODE,
                 tick: input.tick,
                 severity: VRecoil.Severity,
-                detail: "FlatRecoilResidual",
+                detail: "FrozenAim",
                 rttMs: rttMs);
         }
 
@@ -630,7 +638,8 @@ public class WeaponSystem : NetworkBehaviour
         // ※ 이 값은 0~shotIndex-1 의 누적이고, input.pitch 에는 이미
         //   GetRecoil(shotIndex) 가 반영돼 있다. 두 값을 그대로 차분하면
         //   한 칸 어긋나므로, 분석 쿼리는 shot_index 에서 반동을 직접
-        //   유도해야 한다. RecoilValidator 가 서버에서 하는 계산과 같다.
+        //   유도해야 한다. 서버 판정(RecoilValidator)은 pitch 차분만
+        //   쓰므로 이 어긋남과 무관하다.
         Vector2 expected = WeaponConfig.GetAccumulatedRecoil(shotIndex);
 
         string type = killed ? "KILL" : (hit ? "HIT" : "FIRE");

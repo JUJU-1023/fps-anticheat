@@ -8,12 +8,19 @@
 //   클라이언트만 반동을 계산하면 서버는 이미 조작된 yaw/pitch를 받는다.
 //   노리코일 핵(반동 자동 상쇄)이 정상 입력과 구별되지 않는다.
 //
-//   서버가 패턴을 알고 있으면 "이 플레이어가 반동을 얼마나 상쇄했는가"를
-//   계산할 수 있다. 사람은 반동을 손으로 따라가느라 궤적이 흔들리지만
-//   노리코일 핵은 오차가 0에 수렴한다. 이 차이가 W8 탐지 지표가 된다.
+//   서버가 패턴을 알고 있으면 "이 플레이어의 조준점이 반동을 받았는가"를
+//   판단할 수 있다. 반동이 적용되는 클라이언트에서 조준점을 고정하려면
+//   마우스를 반동과 정확히 같은 양만큼 반대로 움직여야 한다. 노리코일은
+//   손을 떼기만 하면 된다. 이 차이가 W8 탐지 지표가 된다.
+//   (V-RECOIL-01, RecoilValidator.cs 참조)
 //
 //   따라서 반동 함수는 반드시 결정론적이어야 한다.
 //   Random을 쓰면 클라/서버 값이 갈려 이 비교 자체가 불가능해진다.
+//
+//  ─────────────────────────────────────────────────────────────────
+//  W8 Day 2 변경
+//   RecoilRampShots 를 public 으로 노출. V-RECOIL-01 이 램프 구간
+//   (반동이 발마다 커지는 구간)을 판정에서 제외하는 데 쓴다.
 // =====================================================================
 
 using UnityEngine;
@@ -44,8 +51,15 @@ public static class WeaponConfig
     public static readonly Vector3 EyeOffset = new Vector3(0f, 0.75f, 0f);
 
     // --- 반동 ---
-    /// <summary>반동이 최대에 도달하는 발수.</summary>
-    private const int RecoilRampShots = 8;
+    /// <summary>
+    /// 반동이 최대에 도달하는 발수.
+    ///
+    /// ★ public 인 이유 (W8 Day 2) ★
+    /// V-RECOIL-01 이 이 값 이후의 발만 판정한다. 램프 구간에서는
+    /// 반동이 0.4 에서 1.1 로 발마다 커지므로 "조준점 고정"의 난이도가
+    /// 균일하지 않고, 정상과 핵의 경계가 흐려진다.
+    /// </summary>
+    public const int RecoilRampShots = 8;
 
     private const float RecoilVerticalStart = 0.4f;   // deg
     private const float RecoilVerticalMax = 1.1f;   // deg
@@ -75,7 +89,11 @@ public static class WeaponConfig
     /// <summary>
     /// 0발부터 n-1발까지의 반동 누적.
     /// 서버가 "이 시점의 이론적 조준점"을 계산할 때 쓴다.
-    /// W8 의 aim_error_deg 산출 기준선이 된다.
+    /// 텔레메트리의 expected_recoil_pitch 가 이 값이다.
+    ///
+    /// ※ 이 값은 0~n-1 누적이고 input.pitch 에는 이미 GetRecoil(n) 이
+    ///   반영돼 있다. 두 값을 그대로 차분하면 한 칸 어긋나므로,
+    ///   분석 쿼리는 shot_index 에서 반동을 직접 유도해야 한다.
     /// </summary>
     public static Vector2 GetAccumulatedRecoil(int shotCount)
     {
