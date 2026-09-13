@@ -5,8 +5,18 @@
 //  체력, 사망, 리스폰. 모든 판정은 서버가 한다.
 //  PlayerCharacter 프리팹에 붙인다.
 //
-//  NetworkVariable 로 체력을 노출해 클라이언트가 UI 를 그린다.
-//  쓰기 권한은 서버에만 준다. 클라이언트가 체력을 바꿀 수 없다.
+//  NetworkVariable 로 상태를 노출해 클라이언트가 UI 를 그린다.
+//  쓰기 권한은 서버에만 준다. 클라이언트가 값을 바꿀 수 없다.
+//
+//  ─────────────────────────────────────────────────────────────────
+//  W8 Day 4 변경
+//   Kills / Deaths 를 NetworkVariable 로 바꿨다.
+//
+//   기존에는 서버 전용 int 라 소유 클라이언트가 읽을 수 없었다.
+//   session_summary 집계용으로만 쓰였고 화면에는 못 띄웠다.
+//
+//   쓰기 권한은 여전히 서버에만 있으므로 판정에는 영향이 없다.
+//   클라이언트가 화면 숫자를 바꿔도 서버 값과 무관하다.
 // =====================================================================
 
 using System.Collections;
@@ -25,23 +35,37 @@ public class PlayerHealth : NetworkBehaviour
         NetworkVariableReadPermission.Everyone,
         NetworkVariableWritePermission.Server);
 
-    public int  Health => _health.Value;
+    // --- 통계 (session_summary + HUD) ---
+    //
+    // W8 Day 4: 서버 전용 int 에서 NetworkVariable 로 승격.
+    // 소유 클라이언트가 우상단에 K/D 를 그린다.
+
+    private readonly NetworkVariable<int> _kills = new NetworkVariable<int>(
+        0,
+        NetworkVariableReadPermission.Everyone,
+        NetworkVariableWritePermission.Server);
+
+    private readonly NetworkVariable<int> _deaths = new NetworkVariable<int>(
+        0,
+        NetworkVariableReadPermission.Everyone,
+        NetworkVariableWritePermission.Server);
+
+    public int Health => _health.Value;
     public bool IsDead => _dead.Value;
+
+    public int Kills => _kills.Value;
+    public int Deaths => _deaths.Value;
 
     /// <summary>사망/부활 시점에 클라이언트가 카메라를 전환하도록 알린다.</summary>
     public event System.Action<bool> OnDeadChanged;
 
     private PlayerController _controller;
-    private PlayerRewind     _rewind;
-
-    // 통계 (session_summary 용)
-    public int Kills  { get; private set; }
-    public int Deaths { get; private set; }
+    private PlayerRewind _rewind;
 
     public override void OnNetworkSpawn()
     {
         _controller = GetComponent<PlayerController>();
-        _rewind     = GetComponent<PlayerRewind>();
+        _rewind = GetComponent<PlayerRewind>();
 
         _dead.OnValueChanged += HandleDeadChanged;
     }
@@ -72,8 +96,8 @@ public class PlayerHealth : NetworkBehaviour
         _health.Value = Mathf.Max(0, _health.Value - amount);
         if (_health.Value > 0) return false;
 
-        Deaths++;
-        if (attacker != null && attacker != this) attacker.Kills++;
+        _deaths.Value++;
+        if (attacker != null && attacker != this) attacker._kills.Value++;
 
         _dead.Value = true;
 
@@ -94,13 +118,14 @@ public class PlayerHealth : NetworkBehaviour
                     : new Vector3(0f, 1f, 0f);
 
         _health.Value = WeaponConfig.MaxHealth;
-        _dead.Value   = false;
+        _dead.Value = false;
 
         _rewind?.SetHitboxesActive(true);
 
-        // ServerTeleport 안에서 V-MOVE 유예도 다시 부여된다.
+        // ServerTeleport 안에서 V-MOVE 유예와 탄약 복구가 함께 처리된다.
         _controller?.ServerTeleport(pos);
 
-        Debug.Log($"[RESPAWN] client={OwnerClientId} pos={pos}");
+        Debug.Log($"[RESPAWN] client={OwnerClientId} pos={pos} " +
+                  $"K={_kills.Value} D={_deaths.Value}");
     }
 }
