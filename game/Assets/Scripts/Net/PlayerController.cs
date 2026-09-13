@@ -4,9 +4,6 @@
 //
 //  W7 Day 2 변경
 //   (1) 서버 조준각 보관 (serverAimYaw / serverAimPitch)
-//       Simulate() 는 transform.rotation 에 yaw 만 반영하고 pitch 는
-//       StatePayload 로 나가고 끝이라 서버에 남지 않았다.
-//       20Hz 가시성 루프가 조준 방향을 재구성하려면 둘 다 필요하다.
 //   (2) VisibilitySystem 등록/해제
 //   (3) V-MOVE 위반 기록에 서버 측정 RTT 를 넣는다 (기존 -1)
 //
@@ -16,31 +13,39 @@
 //       두 치트 모두 기존 입력 경로로만 공격한다. 서버가 관측하는 것은
 //       SubmitInputServerRpc 에 담긴 tick / yaw / pitch / buttons 뿐이라,
 //       외부 프로세스가 메모리를 조작하든 여기서 값을 바꾸든
-//       서버 측 흔적은 동일하다. L2 측정에는 이걸로 충분하다.
+//       서버 측 흔적은 동일하다.
 //
-//       연사핵: 입력 개수는 60/s 그대로 두고 틱만 FireIntervalTicks 씩
-//               부풀린다. V-MOVE 는 개수만 보므로 통과하고, 서버의 발사
-//               게이트(틱 간격)도 매번 통과한다. 실시간 발사율만 6배가
-//               되어 V-FIRE-01 의 토큰 버킷에만 걸린다.
-//
-//       트리거봇: 조준선에 적이 걸리면 그 프레임에 발사 비트를 켠다.
-//               SPOT 직후 인간 하한 미만의 반응으로 관측된다.
-//
-//  W7.5 변경  ← 이번
+//  W7.5 변경
 //   (5) 지면 판정을 바닥 상면 기준으로 재정의
 //
-//       기존 GROUND_Y = 0 은 이름과 달리 "바닥 상면"이 아니라
-//       "캡슐 중심이 지면에 닿는 Transform.y" 였다. 프로토타입 맵의
-//       바닥 상면이 y = -1 이고 Height 2 / Center (0,0,0) 이었기에
-//       우연히 두 값이 같았을 뿐이다.
+//  W8 Day 2 변경
+//   (6) 노리코일 하네스(F4) 배선
 //
-//       측정맵은 바닥 상면이 y = 0 이라 1m 어긋났고, 캐릭터가 절반
-//       묻힌 채 클램프되었다. 이제 바닥 상면만 상수로 두고 나머지는
-//       CharacterController 치수에서 유도한다. 맵 바닥 높이나 CC 치수가
-//       바뀌어도 한 곳만 고치면 된다.
+//       GatherInput 의 반동 적용 단계만 조건부로 건너뛴다.
+//       ClientTryFire 호출은 유지하므로 _clientShotIndex 증가와
+//       OnClientFired 이벤트, 발사 타이밍이 모두 정상이다.
 //
-//       ※ 히트박스(Body h1.6 r0.5 / Head r0.25)는 건드리지 않았다.
-//         W7 측정 유효성 유지.
+//       ※ 반동 적용이 InputPayload 생성보다 먼저라는 점에 유의한다.
+//         shot_index = n 행의 pitch 에는 이미 GetRecoil(n).y 가
+//         반영돼 있다. 분석 쿼리는 shot_index 에서 반동을 직접 유도한다.
+//
+//  W8 Day 3 변경  ← 이번
+//   (7) 재장전 입력(R) 배선
+//
+//       BTN_RELOAD = 1 << 4 로 buttons 에 실어 보낸다. 별도 RPC 를
+//       만들지 않는 이유는 발사와 같다. MovementValidator 는 buttons 를
+//       검사하지 않으므로(move/yaw/pitch 만 본다) V-MOVE 판정에 영향이
+//       없다.
+//
+//       ★ 입력은 Update 에서 래치하고 FixedUpdate 에서 소비한다 ★
+//
+//       GetKeyDown 을 FixedUpdate 에서 직접 읽으면 프레임률에 따라
+//       유실된다. 그렇다고 GetKey 를 쓰면 R 을 누르고 있는 동안
+//       한 발 쏠 때마다 재장전이 걸린다. 발사 직후 _ammo < MagSize 가
+//       즉시 참이 되어 서버의 재장전 조건을 매번 통과하기 때문이다.
+//       (실측 match 79: reloads=8 / accepted=135, 재장전당 15발)
+//
+//       마우스 조준 입력과 같은 방식으로 래치한다.
 // =====================================================================
 
 using Unity.Netcode;
@@ -81,7 +86,6 @@ public class PlayerController : NetworkBehaviour
     //  유도한다 (RestY 참조).
     //
     //  측정맵(__MAP_W7)의 Ground 는 중심 y = -0.5, 두께 1 이므로 윗면이 0.
-    //  프로토타입 맵을 다시 쓸 경우에만 이 값을 되돌린다.
     //
     //  CharacterController.isGrounded 는 Move() 호출 결과에 의존해 replay 시
     //  값이 달라질 수 있으므로 쓰지 않는다 (결정론 유지).
@@ -90,7 +94,6 @@ public class PlayerController : NetworkBehaviour
     // skinWidth(0.08)보다 커야 한다.
     // 작으면 CC의 실제 안착 위치가 RestY 예측과 어긋나는 순간
     // verticalVelocity가 발산하고 점프가 영구히 죽는다.
-    // 평지 단일 지형이라 20cm 허용해도 실질 부작용이 없다.
     private const float GROUND_EPSILON = 0.20f;
 
     /// <summary>
@@ -105,9 +108,6 @@ public class PlayerController : NetworkBehaviour
     /// skinWidth 를 빼먹으면 캐릭터가 영원히 공중으로 판정되어
     /// verticalVelocity 가 무한히 발산하고 점프가 작동하지 않는다 (W6 버그).
     ///
-    /// height / center / skinWidth 는 모두 프리팹 직렬화 값이라
-    /// 클라·서버가 동일하다. 결정론에 안전하다.
-    ///
     /// 현재 값 = 0 + 0.08 + 1.0 - 0 = 1.08
     /// </summary>
     private float RestY => FLOOR_SURFACE_Y + cc.skinWidth + cc.height * 0.5f - cc.center.y;
@@ -120,6 +120,7 @@ public class PlayerController : NetworkBehaviour
     private const byte BTN_FIRE = 1 << 1;
     private const byte BTN_CROUCH = 1 << 2;
     private const byte BTN_SPRINT = 1 << 3;
+    private const byte BTN_RELOAD = 1 << 4;
 
     private CircularBuffer<InputPayload> inputBuffer = new(1024);
     private CircularBuffer<StatePayload> stateBuffer = new(1024);
@@ -131,6 +132,15 @@ public class PlayerController : NetworkBehaviour
 
     // 서버에서 온 미처리 상태 (RPC 콜백에서 담고 FixedUpdate에서 소비)
     private StatePayload? pendingServerState = null;
+
+    /// <summary>
+    /// Update 에서 잡은 재장전 요청. GatherInput 이 한 번 쓰고 지운다.
+    ///
+    /// GetKeyDown 을 FixedUpdate 에서 직접 읽으면 프레임률에 따라
+    /// 유실된다. 그렇다고 GetKey 를 쓰면 R 을 누르고 있는 동안 한 발
+    /// 쏠 때마다 재장전이 걸린다. 마우스 조준과 같은 방식으로 래치한다.
+    /// </summary>
+    private bool reloadLatched = false;
 
     private RemotePlayerInterpolator interpolator;
     private PlayerTelemetry telemetry;
@@ -205,7 +215,6 @@ public class PlayerController : NetworkBehaviour
             serverAimPitch = 0f;
 
             // 스폰 위치가 바닥에 묻힌 채로 시작하지 않도록 한 번 보정한다.
-            // 스폰 마커 Y 가 틀려도 첫 틱부터 정상 안착 상태가 된다.
             if (transform.position.y < RestY)
             {
                 Vector3 p = transform.position;
@@ -245,6 +254,7 @@ public class PlayerController : NetworkBehaviour
             if (health != null && health.IsDead)
             {
                 pendingServerState = null;
+                reloadLatched = false;      // 사망 중 눌린 R 은 버린다
                 return;
             }
 
@@ -255,7 +265,7 @@ public class PlayerController : NetworkBehaviour
                 pendingServerState = null;
             }
 
-            // 2) 치트 시뮬레이션 (테스트용 — 커밋 시 CheatHarness로 분리 예정)
+            // 2) 치트 시뮬레이션 (테스트용)
             if (Input.GetKeyDown(KeyCode.F9))
             {
                 cc.enabled = false;
@@ -306,7 +316,6 @@ public class PlayerController : NetworkBehaviour
                 // 서버의 발사 게이트(틱 간격)를 매번 통과시킨다.
                 //   V-MOVE   : 개수 60/s, 틱 점프 6 -> 둘 다 정상. 통과.
                 //   V-FIRE-01: 실시간으로는 초당 60발 요청 -> 토큰 버킷이 잡는다.
-                // 이동 속도는 변하지 않는다. 순수 연사속도 조작이다.
                 if (cheat.RapidFire)
                 {
                     var rapid = input;
@@ -316,8 +325,6 @@ public class PlayerController : NetworkBehaviour
                 }
 
                 // --- 스피드핵 ---
-                // 같은 입력을 배율만큼 전송. 시간 조작으로 FixedUpdate 가
-                // 더 자주 도는 것과 서버 관측 결과가 동일하다.
                 int mul = cheat.SpeedMultiplier;
                 if (mul > 1)
                 {
@@ -368,6 +375,11 @@ public class PlayerController : NetworkBehaviour
 
         if (health != null && health.IsDead) return;   // 사망 카메라와 충돌 방지
 
+        // --- 재장전 래치 (W8 Day 3) ---
+        // 누르는 순간만 잡는다. GatherInput 이 한 번 소비하고 지운다.
+        // 이미 래치된 상태에서 또 눌러도 요청은 하나로 합쳐진다.
+        if (Input.GetKeyDown(KeyCode.R)) reloadLatched = true;
+
         currentYaw += Input.GetAxisRaw("Mouse X") * mouseSensitivity;
         currentYaw = Mathf.Repeat(currentYaw, 360f);
 
@@ -385,6 +397,18 @@ public class PlayerController : NetworkBehaviour
         if (Input.GetKey(KeyCode.LeftShift)) buttons |= BTN_SPRINT;
         if (Input.GetMouseButton(0)) buttons |= BTN_FIRE;
 
+        // --- 재장전 (W8 Day 3) ---
+        // Update 에서 래치한 요청을 한 번만 소비한다.
+        //
+        // GetKey 로 매 틱 보내면 안 된다. 발사 직후 _ammo < MagSize 가
+        // 즉시 참이 되어 한 발 쏠 때마다 재장전이 걸린다.
+        // (실측 match 79: reloads=8 / accepted=135)
+        if (reloadLatched)
+        {
+            buttons |= BTN_RELOAD;
+            reloadLatched = false;
+        }
+
         // --- 치트: 발사 비트 주입 (테스트 전용) ---
         // 카메라 transform 대신 currentYaw/Pitch 로 방향을 재구성한다.
         // 서버가 input.yaw/pitch 로 하는 계산과 정확히 같아야
@@ -401,12 +425,25 @@ public class PlayerController : NetworkBehaviour
             }
         }
 
-        // 반동을 시야에 적용한다. 서버도 같은 패턴을 알고 있어
-        // 조작 시 서버 계산과 어긋난다(W8 노리코일 탐지).
         if (weapon != null)
         {
+            // 재장전 예측. 서버가 최종 판정하며 여기서는 타이머만 건다.
+            weapon.ClientTryReload((buttons & BTN_RELOAD) != 0);
+
+            // 반동을 시야에 적용한다. 탄약이 0이거나 재장전 중이면
+            // ClientTryFire 가 zero 를 돌려주므로 아무 일도 일어나지 않는다.
             Vector2 recoil = weapon.ClientTryFire(tick, (buttons & BTN_FIRE) != 0);
-            if (recoil != Vector2.zero)
+
+            // ★ W8 Day 2 ★ 노리코일 하네스(F4).
+            // ClientTryFire 는 위에서 그대로 호출했다. _clientShotIndex 증가와
+            // OnClientFired 이벤트, 발사 타이밍은 전부 정상 진행된다.
+            // 여기서 건너뛰는 것은 "반동을 시야에 반영하는" 단계뿐이다.
+            //
+            // 메모리에서 반동 적용을 무력화하는 외부 핵과 서버 관측 결과가
+            // 같아진다. 서버가 보는 것은 input.pitch 하나뿐이기 때문이다.
+            bool noRecoil = cheat != null && cheat.Active && cheat.NoRecoil;
+
+            if (recoil != Vector2.zero && !noRecoil)
             {
                 currentYaw = Mathf.Repeat(currentYaw + recoil.x, 360f);
                 currentPitch = Mathf.Clamp(currentPitch - recoil.y, -89f, 89f);
@@ -414,6 +451,10 @@ public class PlayerController : NetworkBehaviour
             }
         }
 
+        // ※ 반동이 여기서 이미 적용된 뒤 pitch 가 담긴다.
+        //   shot_index = n 행의 pitch 에는 GetRecoil(n).y 가 반영돼 있고,
+        //   expected_recoil_pitch[n] 은 0~n-1 누적이라 한 칸 어긋난다.
+        //   분석 시에는 shot_index 에서 반동을 직접 유도한다.
         return new InputPayload
         {
             tick = tick,
@@ -539,12 +580,7 @@ public class PlayerController : NetworkBehaviour
                     detail: reason.ToString(),
                     rttMs: rttMs);
 
-
                 // ★ W7 Day 5 ★ 거부돼도 타임라인은 전진시킨다.
-                if (input.tick > lastProcessedTick) lastProcessedTick = input.tick;
-
-                return;
-                /* ★ W7 Day 5 ★ 거부돼도 타임라인은 전진시킨다.
                 // 갱신하지 않으면 lastProcessedTick 이 멈춰, 이후의
                 // 정상 입력까지 전부 TickReplay 로 분류된다.
                 // 치트 1회가 수백 건으로 증폭되는 원인. (V-FIRE 와 동일 구조)
@@ -552,7 +588,7 @@ public class PlayerController : NetworkBehaviour
                 // 이동은 여전히 적용되지 않으므로 처벌 효과는 유지된다.
                 if (input.tick > lastProcessedTick) lastProcessedTick = input.tick;
 
-                return;*/
+                return;
             }
         }
 
@@ -579,7 +615,7 @@ public class PlayerController : NetworkBehaviour
 
         BroadcastStateClientRpc(authoritative);
 
-        // ★ W6.5 사격 ★
+        // ★ W6.5 사격 / W8 Day 3 재장전 ★
         weapon?.ServerProcessInput(input, serverTick, rttMs);
     }
 
@@ -619,7 +655,6 @@ public class PlayerController : NetworkBehaviour
     /// <summary>
     /// 서버가 권위적으로 위치를 이동시킨다 (스폰, 리스폰 등).
     /// 전달된 Y 가 안착 높이보다 낮으면 RestY 로 올려붙인다.
-    /// 스폰 마커 Y 가 틀려도 캐릭터가 바닥에 묻히지 않는다.
     /// </summary>
     public void ServerTeleport(Vector3 position)
     {
@@ -659,6 +694,7 @@ public class PlayerController : NetworkBehaviour
         {
             currentYaw = state.yaw;
             stateBuffer.Set(state.tick, state);
+            reloadLatched = false;      // 리스폰 직전에 눌린 R 은 버린다
         }
     }
 

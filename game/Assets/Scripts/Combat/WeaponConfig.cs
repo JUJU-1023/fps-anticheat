@@ -18,9 +18,9 @@
 //   Random을 쓰면 클라/서버 값이 갈려 이 비교 자체가 불가능해진다.
 //
 //  ─────────────────────────────────────────────────────────────────
-//  W8 Day 2 변경
-//   RecoilRampShots 를 public 으로 노출. V-RECOIL-01 이 램프 구간
-//   (반동이 발마다 커지는 구간)을 판정에서 제외하는 데 쓴다.
+//  W8 Day 2 : RecoilRampShots 를 public 으로 노출 (V-RECOIL-01 이 램프
+//             구간을 판정에서 제외하는 데 쓴다)
+//  W8 Day 3 : 탄약 / 재장전 상수 추가  ← 이번 변경
 // =====================================================================
 
 using UnityEngine;
@@ -33,6 +33,23 @@ public static class WeaponConfig
 
     /// <summary>히트스캔 최대 사거리(m).</summary>
     public const float MaxRange = 100f;
+
+    // --- 탄약 (W8 Day 3) ---
+    /// <summary>탄창 한 개 분량.</summary>
+    public const int MagSize = 30;
+
+    /// <summary>
+    /// 여분 탄약. 리스폰하면 이 값으로 복구된다.
+    /// 데모 길이(매치 5분)에 비해 넉넉하므로 탄약 고갈로 경기가
+    /// 멈추는 일은 없다. 측정 세션에서도 재장전 6회분이 확보된다.
+    /// </summary>
+    public const int ReserveAmmo = 150;
+
+    /// <summary>
+    /// 재장전 소요 시간(초). 서버 실시간 기준으로 잰다.
+    /// 클라 틱으로 재면 틱을 부풀려 즉시 재장전할 수 있다.
+    /// </summary>
+    public const float ReloadSec = 2.0f;
 
     // --- 데미지 ---
     public const int BodyDamage = 25;
@@ -58,6 +75,9 @@ public static class WeaponConfig
     /// V-RECOIL-01 이 이 값 이후의 발만 판정한다. 램프 구간에서는
     /// 반동이 0.4 에서 1.1 로 발마다 커지므로 "조준점 고정"의 난이도가
     /// 균일하지 않고, 정상과 핵의 경계가 흐려진다.
+    ///
+    /// ※ 탄창 30발에서 램프 8발을 빼면 탄창당 표본이 22발이다.
+    ///   V-RECOIL 의 창 40발은 두 탄창이면 찬다.
     /// </summary>
     public const int RecoilRampShots = 8;
 
@@ -88,7 +108,6 @@ public static class WeaponConfig
 
     /// <summary>
     /// 0발부터 n-1발까지의 반동 누적.
-    /// 서버가 "이 시점의 이론적 조준점"을 계산할 때 쓴다.
     /// 텔레메트리의 expected_recoil_pitch 가 이 값이다.
     ///
     /// ※ 이 값은 0~n-1 누적이고 input.pitch 에는 이미 GetRecoil(n) 이
