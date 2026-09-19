@@ -113,9 +113,10 @@ public class PlayerHealth : NetworkBehaviour
         yield return new WaitForSeconds(WeaponConfig.RespawnDelaySec);
         if (!IsServer) yield break;
 
+        // PlayerController 를 넘겨 Y 가 안착 높이(RestY)로 맞춰지게 한다.
         Vector3 pos = SpawnManager.Instance != null
-                    ? SpawnManager.Instance.GetNextSpawnPosition()
-                    : new Vector3(0f, 1f, 0f);
+                    ? SpawnManager.Instance.GetNextSpawnPosition(_controller)
+                    : new Vector3(0f, _controller != null ? _controller.SpawnRestY : 1.08f, 0f);
 
         _health.Value = WeaponConfig.MaxHealth;
         _dead.Value = false;

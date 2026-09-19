@@ -5,7 +5,7 @@
 //  사격. PlayerCharacter 프리팹에 붙인다.
 //
 //  구조
-//   클라이언트: 반동을 시야에 적용한다(체감용). 탄약을 예측한다.
+//   클라이언트: 반동을 시야에 적용한다(체감용).
 //   서버      : 발사 판정, 탄약, 되감기, 히트스캔, 데미지, 텔레메트리.
 //
 //  발사·재장전 신호는 InputPayload.buttons 의 비트로 온다.
@@ -19,8 +19,49 @@
 //  W7 Day 4 : spot_event_id 기록, V-TIME-01 배선
 //  W7 Day 5 : shotIndex 를 V-TIME-01 에 전달, OnClientFired 이벤트
 //  W8 Day 1 : 반동 인덱스 축 불일치 계측 + 발사 경로 카운터
-//  W8 Day 2 : V-RECOIL-01 배선 (고정 빈도 지표)
-//  W8 Day 3 : 탄약 / 재장전  ← 이번 변경
+//  W8 Day 2 : V-RECOIL-01 배선
+//  W8 Day 3 : 탄약 / 재장전
+//  W8.5     : 클라 탄약 예측 제거  ← 이번 변경
+//
+//  ─────────────────────────────────────────────────────────────────
+//  ★ W8.5 : 클라 탄약 예측이 V-RECOIL 오탐을 만들었다 ★
+//
+//  증상
+//   정상 플레이 세션에서 pitch 가 소수점까지 동일한 발사가 11~13발
+//   연속으로 기록됐다(match 97/98). V-RECOIL-01 이 보는 "조준점 고정"이
+//   바로 이 상태라, 정상 플레이의 최장 연속이 2 에서 14 로 뛰었다.
+//
+//  원인
+//   W8 Day 3 에서 넣은 FinishClientReload 가 서버의 여분을 읽었다.
+//
+//     int take = Mathf.Min(need, _reserve.Value);
+//
+//   _reserve.Value 는 서버가 재장전을 마치며 이미 차감한 값이다.
+//   마지막(5회차) 재장전에서 서버 여분이 0 이 되므로 클라는 take = 0 을
+//   받고 _clientAmmo 가 0 으로 남는다.
+//
+//     서버  탄창 30 발 보유 → 발사 승인 → combat_events 에 행 기록
+//     클라  _clientAmmo = 0 → ClientTryFire 가 zero 반환 → 반동 미적용
+//
+//   결과적으로 마지막 탄창 전체가 "반동 없는 발사"로 기록된다.
+//
+//  로그로 확인된 근거
+//     match 98 p19  accepted=150 ammo=30/0  → 마지막 탄창 미사용, max_run 1
+//     match 98 p1   accepted=172 ammo=8/0   → 마지막 탄창 22 발 사용, max_run 13
+//     match 99      서로 사살 반복          → 리스폰마다 재동기, max_run 2
+//
+//  수정
+//   클라 예측(_clientAmmo, _clientReloadEndsAt)을 전부 버리고 서버의
+//   NetworkVariable 을 직접 읽는다. 어긋날 여지가 원천적으로 없다.
+//
+//   RTT 2~8ms 면 10 발/초 기준 한 틱도 안 되는 지연이다. 지연이 커져도
+//   방향이 안전하다. 클라가 한 발 늦게 "탄약 0" 을 알면 반동을 한 번 더
+//   거는 쪽이고, 그건 서버가 어차피 거부해 행이 남지 않는다.
+//
+//  교훈
+//   클라 예측은 서버와 같은 입력으로 같은 결과를 내야 의미가 있다.
+//   여기서는 클라가 서버 상태(_reserve)를 참조해 자기 상태를 갱신했다.
+//   입력이 다른데 결과가 같기를 기대한 것이 설계 오류였다.
 //
 //  ─────────────────────────────────────────────────────────────────
 //  ★ W8 Day 3 : 탄약 게이트의 순서가 중요하다 ★
@@ -38,54 +79,10 @@
 //   GatherInput 은 마우스를 누르고 있는 동안 매 틱 BTN_FIRE 를 보낸다.
 //   탄약이 0이거나 재장전 중이면 _lastFireTick 이 전진하지 않으므로
 //   gapTicks 가 계속 커져 간격 게이트를 매번 통과한다. 그 요청이
-//   V-FIRE 까지 도달하면 초당 60개씩 토큰을 태운다. 충전은 10/s 라
+//   V-FIRE 까지 도달하면 초당 60개씩 토큰을 태운다. 충전은 15/s 라
 //   즉시 위반이 난다.
 //
-//   W7 Day 5 의 V-MOVE 183건 연쇄와 같은 구조다. 거부 경로가 상태를
-//   전진시키지 않으면 정상 입력이 무한히 재시도되어 다음 검증기를
-//   폭격한다.
-//
-//  ─────────────────────────────────────────────────────────────────
-//  ★ W8 Day 3 : 탄약 0 상태의 발사 요청 ★
-//
-//   정상 클라이언트는 탄약이 0이면 BTN_FIRE 를 보내도 ClientTryFire 가
-//   막으므로, 서버가 "탄약 0인데 발사 게이트까지 도달한 요청"을 보는
-//   일은 예측 오차 범위(한두 발) 외에는 없어야 한다.
-//
-//   이 값이 크면 클라이언트 변조 신호다. 다만 표본이 없으므로 오늘은
-//   카운터만 세고 위반 코드는 만들지 않는다. 실측 후 W9 에서
-//   V-AMMO-01 로 승격할지 판단한다.
-//
-//   ※ 자동 재장전을 넣지 않은 이유가 여기 있다. 자동으로 채우면
-//     "탄약 0에서의 발사 요청"이 정상 플레이에서도 섞여 들어와
-//     이 카운터가 무의미해진다.
-//
-//  ─────────────────────────────────────────────────────────────────
-//  ★ W8 Day 3 : 재장전과 반동 인덱스 ★
-//
-//   재장전하면 _shotIndex 를 0 으로 되돌린다. 새 탄창은 새 스프레이라는
-//   것이 일반적인 FPS 규칙이고, 클라이언트도 같은 시점에 리셋한다.
-//
-//   V-RECOIL-01 은 따로 손댈 필요가 없다. 재장전 후 첫 발이
-//   shotIndex == 0 이므로 기존 버스트 경계 로직이 _lastPitch 를 알아서
-//   재설정한다. 판정 창은 버스트를 넘어 이어지도록 설계돼 있으므로
-//   재장전 중에도 유지되는 것이 맞다.
-//
-//   ※ 탄창 30발에서 램프 8발을 빼면 탄창당 표본이 22발이다.
-//     창 40발은 두 탄창이면 찬다.
-//
-//  ─────────────────────────────────────────────────────────────────
-//  ★ W8 Day 2 : V-RECOIL-01 ★
-//
-//   지표는 "두 발 사이에 조준점이 전혀 안 움직인 비율"이다.
-//   창 40발 중 24발(60%) 이상이면 보고한다.
-//   실측 정상 4.6~9.0% / 노리코일 64.8~93.3%.
-//
-//   ※ 1차 설계였던 표본 표준편차는 조준을 유지한 노리코일에서
-//     무너졌다(match 72). 실패 기록과 임계 근거는
-//     RecoilValidator.cs 상단 참조.
-//
-//   차단은 하지 않는다. 관리자가 대시보드를 보고 판단한다(B안).
+//   실측 검증: 정상 세션 noAmmoRejected=334 / violationRejected=0
 //
 //  ─────────────────────────────────────────────────────────────────
 //  ★ W8 Day 1 : 왜 fire_gap_ticks 와 fire_gap_ms 를 둘 다 남기는가 ★
@@ -100,9 +97,8 @@
 //   램프 구간만 보게 되어 판정 표본을 전부 잃는다.
 //
 //   실측 불일치율은 발사 기준 0.28%, 버스트 기준 1.4% 였다(match 57).
-//   판정은 SQL 에서 한다. 서버가 미리 접어서 저장하지 않는 이유는
-//   RecoilResetTicks 를 조정할 때 과거 데이터를 다시 해석할 수 있어야
-//   하기 때문이다. 두 값 모두 첫 발에서는 null 이다.
+//   판정은 SQL 에서 한다. RecoilResetTicks 를 조정할 때 과거 데이터를
+//   다시 해석할 수 있어야 하기 때문이다.
 //
 //  ─────────────────────────────────────────────────────────────────
 //  ★ W8 Day 1 : 발사 경로 카운터 ★
@@ -113,12 +109,7 @@
 //
 //   행을 더 만들지 않고 카운터로 세서 리스폰·디스폰 시 로그로 남긴다.
 //   Promtail → Loki 로 들어가므로 스키마 변경 없이 조회된다.
-//
-//   ※ FireIntervalTicks=6 은 초당 10발이고 V-FIRE 토큰 버킷 충전도
-//     10/s 다. 헤드룸이 0이라 V-MOVE 에서 겪은 연쇄 구조와 같다.
-//     capacity 4 로 버티는 중이므로 violationRejected 값을 보고
-//     충전율 상향을 판단한다. 올리면 rapidfire 탐지 임계도 같이
-//     올라가는 트레이드오프가 있다.
+//   ammo=N/M 이 함께 찍히므로 세션 끝의 탄약 정합성도 확인할 수 있다.
 //
 //  ─────────────────────────────────────────────────────────────────
 //  aim_error_deg 를 발사 시점에 계산하는 이유
@@ -129,10 +120,6 @@
 //   ★ 빗나간 FIRE 에도 기록한다.
 //     에임봇의 신호는 "맞췄다"가 아니라 "오차 분포가 비정상적으로
 //     좁다"이다. 명중분만 모으면 W13 에서 이 feature 가 죽는다.
-//
-//  target_dist 를 빗나간 사격에도 채우는 이유
-//   aim_error_deg 는 각도라 거리 없이는 실제 빗나간 폭을 알 수 없다.
-//   1도는 5m 에서 8.7cm, 50m 에서 87cm 다.
 //
 //  spot_event_id
 //   이 발사가 어느 SPOT 에서 이어진 것인지 이어 준다.
@@ -173,8 +160,13 @@ public class WeaponSystem : NetworkBehaviour
     //  탄약 (서버 권위, 클라 읽기 전용)
     // -----------------------------------------------------------------
     //
-    //  NetworkVariable 로 노출해 HUD 가 구독한다. 쓰기 권한은 서버에만
-    //  준다. 클라이언트가 값을 바꿔도 서버 판정에는 영향이 없다.
+    //  NetworkVariable 로 노출해 HUD 와 클라 반동 판정이 함께 읽는다.
+    //  쓰기 권한은 서버에만 준다. 클라이언트가 값을 바꿔도 서버 판정에는
+    //  영향이 없다.
+    //
+    //  ★ 클라는 별도 예측을 두지 않는다 (W8.5) ★
+    //  예측을 두면 서버와 어긋나는 순간 반동이 통째로 사라져
+    //  V-RECOIL-01 에 정상 플레이가 걸린다. 파일 상단 참조.
 
     private readonly NetworkVariable<int> _ammo = new NetworkVariable<int>(
         WeaponConfig.MagSize,
@@ -191,13 +183,13 @@ public class WeaponSystem : NetworkBehaviour
         NetworkVariableReadPermission.Everyone,
         NetworkVariableWritePermission.Server);
 
-    /// <summary>탄창 잔탄. HUD 가 읽는다.</summary>
+    /// <summary>탄창 잔탄. HUD 와 클라 반동 판정이 읽는다.</summary>
     public int Ammo => _ammo.Value;
 
     /// <summary>여분 탄약. HUD 가 읽는다.</summary>
     public int Reserve => _reserve.Value;
 
-    /// <summary>재장전 중인가. HUD 가 읽는다.</summary>
+    /// <summary>재장전 중인가. HUD 와 클라 반동 판정이 읽는다.</summary>
     public bool IsReloading => _reloading.Value;
 
     /// <summary>재장전이 끝나는 서버 실시간. 음수면 재장전 중이 아니다.</summary>
@@ -209,13 +201,12 @@ public class WeaponSystem : NetworkBehaviour
     private int _shotIndex = 0;      // 연사 중 몇 번째 발인지 (반동 인덱스)
 
     // --- 서버 발사 경로 카운터 (W8 Day 1/3) ---
-    // 거부된 발사는 combat_events 에 남지 않으므로 여기서 센다.
     private int _fireAccepted;
     private int _fireGateRejected;       // 게임플레이 발사 간격 게이트
     private int _fireReloadRejected;     // 재장전 중 발사 요청
     private int _fireNoAmmoRejected;     // 탄약 0 상태 발사 요청 (변조 신호 후보)
     private int _fireViolationRejected;  // V-FIRE-01, 사유 있음
-    private int _fireSilentRejected;     // V-FIRE-01, 사유 None (흔적 없던 경로)
+    private int _fireSilentRejected;     // V-FIRE-01, 사유 None
     private int _reloadAccepted;
     private int _reloadIgnored;          // 이미 가득 / 이미 재장전 중 / 여분 없음
 
@@ -223,11 +214,9 @@ public class WeaponSystem : NetworkBehaviour
     private ReactionTimeValidator _reaction;
     private RecoilValidator _recoil;
 
-    // --- 클라 상태 (반동·탄약 예측용) ---
+    // --- 클라 상태 (반동 인덱스만. 탄약은 서버 값을 직접 읽는다) ---
     private int _clientLastFireTick = -1000;
     private int _clientShotIndex = 0;
-    private int _clientAmmo = WeaponConfig.MagSize;
-    private float _clientReloadEndsAt = -1f;
 
     private PlayerHealth _health;
     private PlayerRewind _rewind;
@@ -259,12 +248,6 @@ public class WeaponSystem : NetworkBehaviour
             _reaction = new ReactionTimeValidator();
             _recoil = new RecoilValidator();
         }
-
-        if (IsOwner)
-        {
-            _clientAmmo = WeaponConfig.MagSize;
-            _clientReloadEndsAt = -1f;
-        }
     }
 
     /// <summary>
@@ -272,7 +255,8 @@ public class WeaponSystem : NetworkBehaviour
     ///
     /// 위반 건수만으로는 해석할 수 없다. 측정이 몇 번 일어났는지(분모)를
     /// 모르면 "위반 1건"이 오탐률 0.5% 인지 33% 인지 구분되지 않는다.
-    /// V-TIME 에서 이걸로 한 번 데였다.
+    /// ammo=N/M 은 탄약 정합성 확인용이다. accepted + N 이 초기 보유량과
+    /// 맞지 않으면 어딘가에서 탄약이 새고 있다.
     /// </summary>
     public override void OnNetworkDespawn()
     {
@@ -323,19 +307,22 @@ public class WeaponSystem : NetworkBehaviour
     }
 
     // -----------------------------------------------------------------
-    //  클라이언트: 반동과 탄약 예측
+    //  클라이언트: 반동
     // -----------------------------------------------------------------
 
     /// <summary>
     /// 소유 클라이언트가 발사 입력을 만들 때 호출한다.
-    /// 반동만큼 시야를 밀어 올리고 탄약을 하나 소비한다.
+    /// 반동만큼 시야를 밀어 올린다.
     ///
-    /// 탄약을 클라에서도 세는 이유는 두 가지다.
-    ///   1) 탄약이 0인데 반동만 계속 올라가는 것을 막는다.
-    ///   2) 서버가 거부할 발사에 BTN_FIRE 를 계속 보내면 V-FIRE 토큰을
-    ///      태운다. 클라가 먼저 멈추는 것이 옳다.
+    /// ★ 탄약은 서버 값(_ammo, _reloading)을 직접 읽는다 ★
+    /// 클라 예측을 두면 서버와 어긋나는 순간 반동이 통째로 사라져
+    /// V-RECOIL-01 에 정상 플레이가 걸린다. W8.5 에서 실제로 발생했다.
+    /// 파일 상단 참조.
     ///
-    /// 이 값은 예측일 뿐이다. 판정은 전적으로 서버가 한다.
+    /// 서버 값은 RTT 만큼 늦다. 10 발/초 기준 2~8ms 는 한 틱도 안 되고,
+    /// 지연이 커져도 방향이 안전하다. 클라가 한 발 늦게 "탄약 0" 을
+    /// 알면 반동을 한 번 더 거는 쪽인데, 그 발사는 서버가 어차피
+    /// 거부하므로 텔레메트리에 행이 남지 않는다.
     ///
     /// ※ 여기의 반동 리셋은 클라 틱 축이고 서버는 실시간 축이다.
     ///   불일치율은 실측 0.28%(발사 기준). 파일 상단 참조.
@@ -345,15 +332,9 @@ public class WeaponSystem : NetworkBehaviour
         if (!firePressed) return Vector2.zero;
         if (_health != null && _health.IsDead) return Vector2.zero;
 
-        // 재장전 중에는 발사가 성립하지 않는다.
-        float now = Time.realtimeSinceStartup;
-        if (_clientReloadEndsAt > 0f)
-        {
-            if (now < _clientReloadEndsAt) return Vector2.zero;
-            FinishClientReload();
-        }
-
-        if (_clientAmmo <= 0) return Vector2.zero;
+        // 서버 권위 상태를 그대로 본다.
+        if (_reloading.Value) return Vector2.zero;
+        if (_ammo.Value <= 0) return Vector2.zero;
 
         if (tick - _clientLastFireTick > WeaponConfig.RecoilResetTicks)
             _clientShotIndex = 0;
@@ -362,7 +343,6 @@ public class WeaponSystem : NetworkBehaviour
             return Vector2.zero;
 
         _clientLastFireTick = tick;
-        _clientAmmo--;
 
         Vector2 recoil = WeaponConfig.GetRecoil(_clientShotIndex);
         OnClientFired?.Invoke(_clientShotIndex);   // 증가 전 = 이번 발의 인덱스
@@ -372,41 +352,33 @@ public class WeaponSystem : NetworkBehaviour
 
     /// <summary>
     /// 소유 클라이언트가 재장전 입력을 만들 때 호출한다.
-    /// 예측만 한다. 실제 탄약은 서버가 채운다.
+    /// 사운드·애니메이션 신호만 낸다. 실제 재장전은 전적으로 서버가 한다.
+    ///
+    /// 조건도 서버 값으로 본다. 클라가 별도 타이머를 들면 서버와
+    /// 어긋나고, 그 어긋남이 반동 누락으로 이어진다.
     /// </summary>
-    /// <returns>이번 틱에 재장전이 시작됐으면 true (이펙트·사운드용)</returns>
+    /// <returns>이번 틱에 재장전 신호를 낼 만한 상태면 true</returns>
     public bool ClientTryReload(bool reloadPressed)
     {
         if (!reloadPressed) return false;
         if (_health != null && _health.IsDead) return false;
-        if (_clientReloadEndsAt > 0f) return false;              // 이미 재장전 중
-        if (_clientAmmo >= WeaponConfig.MagSize) return false;   // 이미 가득
+        if (_reloading.Value) return false;                      // 이미 재장전 중
+        if (_ammo.Value >= WeaponConfig.MagSize) return false;   // 이미 가득
         if (_reserve.Value <= 0) return false;                   // 여분 없음
 
-        _clientReloadEndsAt = Time.realtimeSinceStartup + WeaponConfig.ReloadSec;
         OnClientReloadStarted?.Invoke();
         return true;
     }
 
-    /// <summary>클라 예측 탄창을 채운다. 여분 차감은 서버 값을 따른다.</summary>
-    private void FinishClientReload()
+    /// <summary>
+    /// 클라 반동 인덱스를 초기화한다. 리스폰 시 서버가 RPC 로 호출한다.
+    ///
+    /// 탄약은 서버 값을 직접 읽으므로 되돌릴 것이 없다.
+    /// 리스폰 대기가 3초라 RecoilResetTicks(0.35초)로도 어차피 리셋되지만,
+    /// 명시적으로 맞춰 두는 편이 추적하기 쉽다.
+    /// </summary>
+    public void ClientResetFireState()
     {
-        _clientReloadEndsAt = -1f;
-
-        int need = WeaponConfig.MagSize - _clientAmmo;
-        int take = Mathf.Min(need, _reserve.Value);
-        _clientAmmo += take;
-
-        // 새 탄창은 새 스프레이. 서버도 같은 시점에 리셋한다.
-        _clientShotIndex = 0;
-        _clientLastFireTick = -1000;
-    }
-
-    /// <summary>클라 예측 상태를 서버 값으로 되돌린다. 리스폰 시 호출.</summary>
-    public void ClientResetAmmo()
-    {
-        _clientAmmo = WeaponConfig.MagSize;
-        _clientReloadEndsAt = -1f;
         _clientShotIndex = 0;
         _clientLastFireTick = -1000;
     }
@@ -434,7 +406,6 @@ public class WeaponSystem : NetworkBehaviour
         if ((input.buttons & BTN_FIRE) == 0) return;
 
         // --- 두 축의 간격을 리셋 판정 이전에 붙잡는다 (W8 Day 1 계측) ---
-        // 첫 발은 기준이 없으므로 -1 로 두고 텔레메트리에서 null 로 나간다.
         int gapTicks = input.tick - _lastFireTick;
         int reportGapTicks = _lastFireTick < 0 ? -1 : gapTicks;
         int reportGapMs = _lastFireRealtime < 0f
@@ -462,8 +433,6 @@ public class WeaponSystem : NetworkBehaviour
 
         // --- 게이트 3 : 탄약 ---
         // ★ 반드시 V-FIRE 앞에 둔다. ★
-        // 이 카운터가 크면 클라이언트 변조 신호다. 정상 클라이언트는
-        // ClientTryFire 가 먼저 막으므로 예측 오차 범위를 넘지 않는다.
         if (_ammo.Value <= 0)
         {
             _fireNoAmmoRejected++;
@@ -482,7 +451,6 @@ public class WeaponSystem : NetworkBehaviour
             }
             else
             {
-                // 사유 없는 거부. 지금까지 어디에도 남지 않던 경로다.
                 _fireSilentRejected++;
             }
             return;
@@ -499,14 +467,11 @@ public class WeaponSystem : NetworkBehaviour
 
         // --- V-RECOIL-01 : 노리코일 ---
         // 조준각만 쓰므로 되감기 이전에 판정한다. 히트스캔 경로와 무관하다.
-        // 램프 구간(shotIndex < RecoilRampShots)은 표본에서 제외되고,
-        // 창 40발이 차야 평가한다. 한 번 걸린 뒤에는 고정 수가 회복될
-        // 때까지 다시 보고하지 않는다(히스테리시스).
         if (_recoil != null &&
-            _recoil.TryEvaluate(shotIndex, input.pitch, reportGapTicks, out float ratio))
+     _recoil.TryEvaluate(shotIndex, input.pitch, reportGapTicks, out int run))
         {
-            Debug.Log($"[VRECOIL] 위반 uid={PlayerUid} ratio={ratio:F3} " +
-                      $"고정={_recoil.CurrentFrozen}/{_recoil.CurrentWindow} " +
+            Debug.Log($"[VRECOIL] 위반 uid={PlayerUid} 연속={run} " +
+                      $"(임계 {VRecoil.RunLimit}) " +
                       $"shotIndex={shotIndex} tick={input.tick}");
 
             ViolationLogger.Report(
@@ -567,8 +532,7 @@ public class WeaponSystem : NetworkBehaviour
         // 새 탄창은 새 스프레이.
         //
         // V-RECOIL-01 은 따로 손대지 않는다. 다음 발이 shotIndex == 0 이라
-        // 버스트 경계 로직이 _lastPitch 를 알아서 재설정한다. 판정 창은
-        // 버스트를 넘어 이어지도록 설계돼 있으므로 유지되는 것이 맞다.
+        // 버스트 경계 로직이 _lastPitch 를 알아서 재설정한다.
         _shotIndex = 0;
         _lastFireTick = -1000;
         _lastFireRealtime = -999f;
@@ -583,8 +547,8 @@ public class WeaponSystem : NetworkBehaviour
         _fireValidator?.ResetGrace(now);
 
         // 표적별 교전 상태만 버린다. _history 와 누적 카운터는 유지한다.
-        // 매치 단위 누적이라야 RepeatLimit(최근 20회 중 5회) 판정이
-        // 성립하고, W13 Trust Score 의 입력으로도 쓸 수 있다.
+        // 매치 단위 누적이라야 RepeatLimit 판정이 성립하고,
+        // W13 Trust Score 의 입력으로도 쓸 수 있다.
         if (_reaction != null)
         {
             Debug.Log($"[VTIME] respawn uid={PlayerUid} {_reaction.StatsLine()}");
@@ -610,13 +574,13 @@ public class WeaponSystem : NetworkBehaviour
         _lastFireTick = -1000;
         _lastFireRealtime = -999f;
 
-        ResetAmmoClientRpc(RpcTarget.Single(OwnerClientId, RpcTargetUse.Temp));
+        ResetFireStateClientRpc(RpcTarget.Single(OwnerClientId, RpcTargetUse.Temp));
     }
 
     [Rpc(SendTo.SpecifiedInParams)]
-    private void ResetAmmoClientRpc(RpcParams _)
+    private void ResetFireStateClientRpc(RpcParams _)
     {
-        ClientResetAmmo();
+        ClientResetFireState();
     }
 
     private void FireHitscan(InputPayload input, int serverTick, int rttMs,
@@ -703,7 +667,6 @@ public class WeaponSystem : NetworkBehaviour
         }
 
         // --- V-TIME-01 : 반응시간 ---
-        // shotIndex 를 넘긴다. 연사 도중 발사는 반응이 아니다. (W7 Day 5)
         long spotId = ResolveSpotAndCheckReaction(
             aimTarget, nowRt, rttMs, input.tick, shotIndex);
 
@@ -854,8 +817,8 @@ public class WeaponSystem : NetworkBehaviour
     public event System.Action<int> OnClientFired;
 
     /// <summary>
-    /// 소유 클라이언트에서 재장전이 시작된 순간. 사운드·애니메이션이 구독한다.
-    /// 클라 예측이므로 서버가 거절하면 화면과 실제가 잠시 어긋날 수 있다.
+    /// 소유 클라이언트에서 재장전 신호가 난 순간. 사운드·애니메이션이 구독한다.
+    /// 조건은 서버 값으로 판단하므로 서버가 거절하는 경우는 거의 없다.
     /// </summary>
     public event System.Action OnClientReloadStarted;
 
