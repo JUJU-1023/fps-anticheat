@@ -21,7 +21,22 @@
 //  W8 Day 1 : 반동 인덱스 축 불일치 계측 + 발사 경로 카운터
 //  W8 Day 2 : V-RECOIL-01 배선
 //  W8 Day 3 : 탄약 / 재장전
-//  W8.5     : 클라 탄약 예측 제거  ← 이번 변경
+//  W8.5     : 클라 탄약 예측 제거, OnWeaponFired 이벤트  ← 이번 변경
+//
+//  ─────────────────────────────────────────────────────────────────
+//  ★ W8.5 : 3인칭 발사 애니메이션은 _ammo 감소로 감지한다 ★
+//
+//  OnClientFired 는 소유 클라이언트에서만 발생한다. 원격 플레이어의
+//  발사 모션에는 쓸 수 없다.
+//
+//  새 RPC 를 파는 대신 _ammo 의 OnValueChanged 를 쓴다. _ammo 는
+//  서버가 발사를 승인할 때만 감소하므로, 값이 줄어드는 순간이 곧
+//  발사 성립 시점이고 모든 클라이언트가 그것을 관측한다.
+//
+//   - 대역폭이 늘지 않는다. 이미 동기화되는 변수다.
+//   - 빌드 프리즈 직전에 네트워크 메시지를 추가하지 않아도 된다.
+//   - 서버가 거부한 발사에는 모션이 나오지 않는다. 스피드핵·연사핵
+//     시연에서 화면과 판정이 어긋나지 않는다.
 //
 //  ─────────────────────────────────────────────────────────────────
 //  ★ W8.5 : 클라 탄약 예측이 V-RECOIL 오탐을 만들었다 ★
@@ -241,6 +256,14 @@ public class WeaponSystem : NetworkBehaviour
 
         BuildRaycastMask();
 
+        // ★ W8.5 ★ 3인칭 발사 애니메이션용.
+        //
+        // _ammo 는 서버가 발사를 승인할 때만 감소한다. 값이 줄어드는
+        // 순간이 곧 발사 성립 시점이고, NetworkVariable 이므로 모든
+        // 클라이언트가 그것을 관측한다. OnClientFired 는 소유자에게만
+        // 오므로 원격 플레이어 모션에는 쓸 수 없다.
+        _ammo.OnValueChanged += OnAmmoChanged;
+
         if (IsServer)
         {
             _fireValidator = new FireRateValidator(
@@ -260,6 +283,10 @@ public class WeaponSystem : NetworkBehaviour
     /// </summary>
     public override void OnNetworkDespawn()
     {
+        // 구독 해제를 먼저 한다. 오브젝트가 재사용되면 중복 구독이 쌓여
+        // 발사 한 번에 트리거가 여러 번 걸린다.
+        _ammo.OnValueChanged -= OnAmmoChanged;
+
         if (IsServer)
         {
             Debug.Log($"[FIRE] final uid={PlayerUid} {FireStatsLine()}");
@@ -270,6 +297,17 @@ public class WeaponSystem : NetworkBehaviour
         }
 
         base.OnNetworkDespawn();
+    }
+
+    /// <summary>
+    /// 탄약이 줄면 발사가 승인된 것이다. 늘어나는 것은 재장전이므로 무시한다.
+    ///
+    /// 서버·소유자·원격 모두에서 호출된다. 서버 판정을 통과한 발사만
+    /// 오므로, 거부된 발사에는 모션이 나오지 않는다.
+    /// </summary>
+    private void OnAmmoChanged(int prev, int next)
+    {
+        if (next < prev) OnWeaponFired?.Invoke();
     }
 
     private string FireStatsLine()
@@ -457,6 +495,8 @@ public class WeaponSystem : NetworkBehaviour
         }
 
         // --- 승인 ---
+        // ※ _ammo 감소가 OnAmmoChanged 를 통해 OnWeaponFired 를 발화시킨다.
+        //   3인칭 발사 애니메이션이 여기에 물려 있다.
         _fireAccepted++;
         _ammo.Value--;
         _lastFireTick = input.tick;
@@ -565,6 +605,9 @@ public class WeaponSystem : NetworkBehaviour
 
         // 탄약 전량 복구. RespawnDelaySec(3초) > ReloadSec(2초) 이므로
         // 사망 중 진행되던 재장전은 버려도 손해가 없다.
+        //
+        // ※ 여기서 _ammo 는 증가하므로 OnWeaponFired 가 발화하지 않는다.
+        //   OnAmmoChanged 가 next < prev 만 본다.
         _ammo.Value = WeaponConfig.MagSize;
         _reserve.Value = WeaponConfig.ReserveAmmo;
         _reloadEndsAt = -1f;
@@ -813,8 +856,20 @@ public class WeaponSystem : NetworkBehaviour
     ///
     /// ClientTryFire 의 반환값(반동 벡터)으로 발사를 감지하면 안 된다.
     /// 패턴 첫 발이 (0,0)이면 발사했는데도 zero 가 나온다.
+    ///
+    /// ※ 소유자에게만 온다. 3인칭 발사 애니메이션에는 OnWeaponFired 를 쓴다.
     /// </summary>
     public event System.Action<int> OnClientFired;
+
+    /// <summary>
+    /// 서버가 발사를 승인한 순간. 소유자·원격 모두에서 발생한다.
+    /// 3인칭 발사 애니메이션(PlayerAnimationDriver)이 구독한다.
+    ///
+    /// _ammo 감소를 신호로 쓰므로 서버 판정을 통과한 발사만 온다.
+    /// 거부된 발사에는 모션이 나오지 않으며, 그래서 치트 시연에서
+    /// 화면과 판정이 어긋나지 않는다.
+    /// </summary>
+    public event System.Action OnWeaponFired;
 
     /// <summary>
     /// 소유 클라이언트에서 재장전 신호가 난 순간. 사운드·애니메이션이 구독한다.

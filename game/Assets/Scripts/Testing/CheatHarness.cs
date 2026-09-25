@@ -12,6 +12,7 @@
 //   그래서 하네스도 전부 SubmitInputServerRpc 경로로 공격한다.
 //
 //  조작
+//   F4  : 노리코일    ← W8 Day 2
 //   F5  : 스피드핵 배율 순환 (1x -> 2x -> 3x -> 5x -> 1x)
 //   F6  : 틱 리플레이 (같은 틱을 20회 재전송)
 //   F7  : 틱 점프 (직전 틱보다 600 앞선 값 전송)
@@ -52,6 +53,35 @@
 //
 //   히트박스는 서버 전용이라 클라이언트에는 없다. 대신 플레이어 루트의
 //   CharacterController 캡슐이 Player 레이어에 있어 그것을 맞힌다.
+//
+//  ─────────────────────────────────────────────────────────────────
+//  ★ F4 노리코일 (W8 Day 2) ★
+//
+//   이 토글은 값을 아무것도 조작하지 않는다. PlayerController.GatherInput
+//   에서 ClientTryFire 는 그대로 호출하고, 반환된 반동 벡터를 시야에
+//   적용하는 단계만 건너뛴다. _clientShotIndex 증가와 OnClientFired
+//   이벤트는 정상 진행된다.
+//
+//   이게 실제 핵과 서버 관측 결과가 같은 이유다. 외부 프로세스가 메모리에서
+//   반동 적용을 무력화하든 마우스로 역보정하든, 서버가 보는 것은
+//   input.pitch 하나뿐이다. 발사 타이밍과 shotIndex 는 정상 그대로이므로
+//   V-FIRE-01 의 토큰 버킷에는 걸리지 않는다. 순수 조준각 조작이다.
+//
+//   서버 관측 (match 57 정상 플레이 실측 대비)
+//
+//     정상 : pitch 가 반동만큼 밀려 올라가고 플레이어가 손으로 되내린다.
+//            잔차 = (pitch 변화) + (반동값)
+//            평균 0.75~0.96, 표준편차 1.12~2.15 도
+//     핵   : pitch 가 반동만큼 움직이지 않는다.
+//            잔차 = 반동값 자체 → 표준편차 약 0.24 도
+//            (램프 구간 0.4→1.1 의 변화폭만 남는다)
+//
+//   평균으로는 사람과 구분되지 않는다. 잘하는 플레이어도 반동을 거의
+//   전부 상쇄하기 때문이다. 구분되는 것은 편차다. 사람은 손으로
+//   따라가느라 흔들리고, 핵은 기계적으로 정확하다.
+//
+//   ※ 측정 시 마우스를 가만히 두지 말 것. 실제 핵 유저도 조준은 한다.
+//     정지 상태로 재면 편차가 인위적으로 낮게 나와 임계가 왜곡된다.
 // =====================================================================
 
 using Unity.Netcode;
@@ -74,6 +104,15 @@ public class CheatHarness : NetworkBehaviour
 
     /// <summary>트리거봇. 조준선에 적이 있으면 자동 발사.</summary>
     public bool TriggerBot { get; private set; }
+
+    /// <summary>
+    /// 노리코일. 반동을 시야에 적용하지 않는다.
+    ///
+    /// PlayerController.GatherInput 이 이 값을 읽어 적용 단계만 건너뛴다.
+    /// ClientTryFire 호출 자체는 유지되므로 _clientShotIndex 와
+    /// OnClientFired 는 정상 진행된다. 발사 타이밍도 변하지 않는다.
+    /// </summary>
+    public bool NoRecoil { get; private set; }
 
     /// <summary>이번 틱에 요청된 일회성 공격.</summary>
     public enum OneShot { None, TickReplay, TickAhead, BadInput }
@@ -105,6 +144,16 @@ public class CheatHarness : NetworkBehaviour
     private void Update()
     {
         if (!Active) return;
+
+        // 노리코일 토글. 켠 시각을 로그에 남긴다.
+        // 한 매치 안에서 정상/핵 구간을 나눠 측정할 때 경계를 찾는 근거가 된다.
+        if (Input.GetKeyDown(KeyCode.F4))
+        {
+            NoRecoil = !NoRecoil;
+            Debug.Log($"[CHEAT] 노리코일 = {NoRecoil} " +
+                      $"({(NoRecoil ? "반동 시야 적용 차단" : "정상")}) " +
+                      $"t={Time.realtimeSinceStartup:F3}");
+        }
 
         if (Input.GetKeyDown(KeyCode.F5))
         {
@@ -196,6 +245,7 @@ public class CheatHarness : NetworkBehaviour
         SpeedMultiplier = 1;
         RapidFire = false;
         TriggerBot = false;
+        NoRecoil = false;
         Pending = OneShot.None;
         _fakeTick = -1;
         _rapidTick = -1;

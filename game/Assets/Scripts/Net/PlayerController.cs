@@ -200,6 +200,8 @@ public class PlayerController : NetworkBehaviour
         if (audioListener) audioListener.enabled = mine;
 
         interpolator = GetComponent<RemotePlayerInterpolator>();
+        interpolator?.ResetForSpawn();          // ★ W8.5 추가
+   
         telemetry = GetComponent<PlayerTelemetry>();
         cheat = GetComponent<CheatHarness>();
         weapon = GetComponent<WeaponSystem>();
@@ -695,6 +697,13 @@ public class PlayerController : NetworkBehaviour
             currentYaw = state.yaw;
             stateBuffer.Set(state.tick, state);
             reloadLatched = false;      // 리스폰 직전에 눌린 R 은 버린다
+        }
+        else
+        {
+            // 원격 플레이어는 보간기가 옛 스냅샷으로 되돌리지 않도록
+            // 버퍼를 비워야 한다. 없으면 부활한 상대가 스폰 지점에
+            // 나타났다가 시체 자리로 끌려간다.
+            interpolator?.OnTeleport(state);
         }
     }
 

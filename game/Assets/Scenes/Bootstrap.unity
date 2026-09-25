@@ -2852,6 +2852,7 @@ MonoBehaviour:
   - {fileID: 1551269452}
   - {fileID: 1708924047}
   - {fileID: 1918720157}
+  fallbackPosition: {x: 0, y: 0, z: 0}
 --- !u!4 &1129733765
 Transform:
   m_ObjectHideFlags: 0
