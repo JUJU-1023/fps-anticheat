@@ -32,11 +32,11 @@
             <TabItem x:Name="LiveTab" Header="실시간 위반">
                 <views:LiveViolationsView Margin="8" />
             </TabItem>
-            <TabItem Header="세션">
-                <TextBlock Text="Day 3" Margin="16" Foreground="Gray" />
+            <TabItem x:Name="SessionsTab" Header="세션">
+                <views:SessionsView Margin="8" />
             </TabItem>
-            <TabItem Header="플레이어">
-                <TextBlock Text="Day 3 (킥/밴은 Day 4)" Margin="16" Foreground="Gray" />
+            <TabItem x:Name="PlayersTab" Header="플레이어">
+                <views:PlayersView Margin="8" />
             </TabItem>
             <TabItem x:Name="DiagTab" Header="진단">
                 <TextBox x:Name="DiagOutput" IsReadOnly="True" FontFamily="Consolas" FontSize="13"

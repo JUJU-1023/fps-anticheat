@@ -57,8 +57,7 @@ LIMIT @limit";
         await using var rd = await cmd.ExecuteReaderAsync();
         while (await rd.ReadAsync())
         {
-            var name = rd.IsDBNull(5) ? null : rd.GetString(5);
-            var uid = rd.IsDBNull(6) ? null : rd.GetString(6);
+            var playerId = rd.GetInt64(4);
 
             list.Add(new ViolationRow
             {
@@ -66,8 +65,8 @@ LIMIT @limit";
                 TimeKst = TimeUtil.ToKst(rd.GetDateTime(1)),
                 MatchId = rd.GetInt64(2),
                 MatchLabel = rd.IsDBNull(3) ? "?" : rd.GetString(3),
-                PlayerId = rd.GetInt64(4),
-                PlayerName = name ?? ShortUid(uid),
+                PlayerId = playerId,
+                PlayerName = PlayerNames.Resolve(playerId, Rd.S(rd, 5), Rd.S(rd, 6)),
                 IsBot = !rd.IsDBNull(7) && Convert.ToBoolean(rd.GetValue(7)),
                 Code = rd.GetString(8),
                 Layer = rd.GetString(9),
@@ -179,7 +178,4 @@ ORDER BY v.code";
         }
         return "";
     }
-
-    private static string ShortUid(string? uid) =>
-        uid == null ? "?" : uid.Length <= 12 ? uid : uid[..12] + "…";
 }

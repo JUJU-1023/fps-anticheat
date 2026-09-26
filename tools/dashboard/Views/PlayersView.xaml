@@ -1,0 +1,108 @@
+<UserControl x:Class="AntiCheatDashboard.Views.PlayersView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Loaded="OnLoaded">
+    <DockPanel>
+
+        <!-- 필터 바 -->
+        <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+            <CheckBox x:Name="ExcludeBox" Content="오염 데이터 제외" IsChecked="True"
+                      VerticalAlignment="Center" Margin="0,0,16,0"
+                      Checked="Filter_Toggled" Unchecked="Filter_Toggled" />
+            <CheckBox x:Name="BotsBox" Content="봇 포함" IsChecked="False"
+                      VerticalAlignment="Center" Margin="0,0,16,0"
+                      Checked="Filter_Toggled" Unchecked="Filter_Toggled" />
+            <CheckBox x:Name="ViolatorsOnlyBox" Content="위반 있는 플레이어만" IsChecked="False"
+                      VerticalAlignment="Center" Margin="0,0,16,0"
+                      Checked="Filter_Toggled" Unchecked="Filter_Toggled" />
+            <Button Content="새로고침" Padding="10,2" Click="Refresh_Click" />
+        </WrapPanel>
+
+        <TextBlock x:Name="StatusLine" DockPanel.Dock="Bottom" Margin="0,6,0,0" Foreground="Gray" />
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="3*" />
+                <RowDefinition Height="5" />
+                <RowDefinition Height="2*" />
+            </Grid.RowDefinitions>
+
+            <!-- 플레이어 목록 -->
+            <DataGrid x:Name="PlayerGrid" Grid.Row="0"
+                      AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                      HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#E0E0E0"
+                      SelectionChanged="PlayerGrid_SelectionChanged">
+                <DataGrid.RowStyle>
+                    <Style TargetType="DataGridRow">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding HasViolations}" Value="True">
+                                <Setter Property="Background" Value="#FFF4E0" />
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding IsBanned}" Value="True">
+                                <Setter Property="Background" Value="#FFE3E3" />
+                                <Setter Property="FontWeight" Value="SemiBold" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </DataGrid.RowStyle>
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="플레이어" Binding="{Binding PlayerText}" Width="170" SortMemberPath="PlayerId" />
+                    <DataGridTextColumn Header="봇" Binding="{Binding BotText}" Width="36" />
+                    <DataGridTextColumn Header="처음 접속" Binding="{Binding FirstSeenText}" Width="86" SortMemberPath="FirstSeenKst" />
+                    <DataGridTextColumn Header="마지막 접속" Binding="{Binding LastSeenText}" Width="86" SortMemberPath="LastSeenKst" />
+                    <DataGridTextColumn Header="교전 매치" Binding="{Binding MatchCount}" Width="64" />
+                    <DataGridTextColumn Header="발사" Binding="{Binding Fires, StringFormat=N0}" Width="64" />
+                    <DataGridTextColumn Header="명중률" Binding="{Binding AccuracyText}" Width="60" />
+                    <DataGridTextColumn Header="헤드샷률" Binding="{Binding HeadshotText}" Width="66" />
+                    <DataGridTextColumn Header="킬" Binding="{Binding Kills}" Width="44" />
+                    <DataGridTextColumn Header="데스" Binding="{Binding Deaths}" Width="44" />
+                    <DataGridTextColumn Header="K/D" Binding="{Binding KdText}" Width="50" />
+                    <DataGridTextColumn Header="위반 합계" Binding="{Binding ViolationTotal, StringFormat=N0}" Width="72" />
+                    <DataGridTextColumn Header="코드별 위반" Binding="{Binding ViolationText}" Width="*" MinWidth="160" />
+                    <DataGridTextColumn Header="상태" Binding="{Binding BanStatus}" Width="120" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch" />
+
+            <!-- 선택한 플레이어의 매치별 이력 -->
+            <DockPanel Grid.Row="2">
+                <DockPanel DockPanel.Dock="Top" Margin="0,6,0,6">
+                    <!-- Day 4: 킥/밴 버튼 자리 -->
+                    <StackPanel x:Name="ActionPanel" DockPanel.Dock="Right" Orientation="Horizontal" />
+                    <TextBlock x:Name="DetailHeader" FontWeight="SemiBold" VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis"
+                               Text="플레이어를 선택하면 매치별 이력이 표시됩니다" />
+                </DockPanel>
+                <DataGrid x:Name="HistoryGrid"
+                          AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                          HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#E0E0E0">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding HasViolations}" Value="True">
+                                    <Setter Property="Background" Value="#FFEDED" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="매치" Binding="{Binding MatchId}" Width="56" />
+                        <DataGridTextColumn Header="레이블" Binding="{Binding Label}" Width="70" />
+                        <DataGridTextColumn Header="시작 (KST)" Binding="{Binding StartText}" Width="90" SortMemberPath="StartKst" />
+                        <DataGridTextColumn Header="길이" Binding="{Binding DurationText}" Width="84" />
+                        <DataGridTextColumn Header="발사" Binding="{Binding Fires, StringFormat=N0}" Width="60" />
+                        <DataGridTextColumn Header="명중률" Binding="{Binding AccuracyText}" Width="60" />
+                        <DataGridTextColumn Header="헤드샷률" Binding="{Binding HeadshotText}" Width="66" />
+                        <DataGridTextColumn Header="킬" Binding="{Binding Kills}" Width="44" />
+                        <DataGridTextColumn Header="데스" Binding="{Binding Deaths}" Width="44" />
+                        <DataGridTextColumn Header="평균 RTT" Binding="{Binding RttText}" Width="64" />
+                        <DataGridTextColumn Header="위반 합계" Binding="{Binding ViolationTotal, StringFormat=N0}" Width="72" />
+                        <DataGridTextColumn Header="코드별 위반" Binding="{Binding ViolationText}" Width="*" MinWidth="160" />
+                    </DataGrid.Columns>
+                </DataGrid>
+            </DockPanel>
+        </Grid>
+
+    </DockPanel>
+</UserControl>

@@ -1,4 +1,8 @@
+using System.Linq;
+
 namespace AntiCheatDashboard.Data;
+
+// ───────── 실시간 위반 ─────────
 
 public sealed class ViolationRow
 {
@@ -53,4 +57,102 @@ public sealed class DbHead
 {
     public long MaxViolationId { get; init; }
     public long LatestMatchId { get; init; }
+}
+
+// ───────── 전투 통계 공통 ─────────
+
+/// <summary>
+/// 명중·헤드샷은 (매치, server_tick) 단위로 중복 제거해서 센다.
+/// 한 발이 HIT와 KILL 두 행으로 남더라도 명중 1회로 세기 위해서다.
+/// 데스는 KILL 행의 target_id 기준.
+/// </summary>
+public class CombatStats
+{
+    public long Fires { get; init; }
+    public long Hits { get; init; }
+    public long Headshots { get; init; }
+    public long Kills { get; init; }
+    public long Deaths { get; init; }
+    public double? AvgRtt { get; init; }
+
+    /// <summary>코드 → SUM(occurrences). 바인딩 전에 채운다.</summary>
+    public Dictionary<string, long> ViolationsByCode { get; set; } = new();
+
+    public long ViolationTotal => ViolationsByCode.Values.Sum();
+    public bool HasViolations => ViolationTotal > 0;
+
+    public string AccuracyText => Fires > 0 ? $"{100.0 * Hits / Fires:0.0}%" : "-";
+    public string HeadshotText => Hits > 0 ? $"{100.0 * Headshots / Hits:0.0}%" : "-";
+    public string KdText => Deaths > 0 ? $"{(double)Kills / Deaths:0.00}" : Kills > 0 ? "∞" : "-";
+    public string RttText => AvgRtt is double r ? $"{r:0}" : "-";
+
+    public string ViolationText => ViolationsByCode.Count == 0
+        ? ""
+        : string.Join("  ·  ", ViolationsByCode
+            .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => $"{CodeFormat.Short(kv.Key)} {kv.Value:N0}"));
+}
+
+// ───────── 세션 탭 ─────────
+
+public sealed class MatchRow
+{
+    public long Id { get; init; }
+    public string Label { get; init; } = "";
+    public DateTime StartKst { get; init; }
+    public DateTime? EndKst { get; init; }
+    public string? Map { get; init; }
+    public string? Notes { get; init; }
+    public int Players { get; init; }
+    public long Fires { get; init; }
+    public long Kills { get; init; }
+    public long ViolationTotal { get; init; }
+    public int Violators { get; init; }
+    public bool Excluded { get; init; }
+
+    public string StartText => StartKst.ToString("MM-dd HH:mm:ss");
+    public string DurationText => EndKst is DateTime e ? TimeUtil.Duration(e - StartKst) : "미종료";
+    public string ViolationText => ViolationTotal == 0 ? "0" : $"{ViolationTotal:N0}  ({Violators}명)";
+}
+
+public sealed class MatchPlayerRow : CombatStats
+{
+    public long PlayerId { get; init; }
+    public string Name { get; init; } = "";
+    public bool IsBot { get; init; }
+
+    public string PlayerText => $"#{PlayerId} {Name}{(IsBot ? " [BOT]" : "")}";
+}
+
+// ───────── 플레이어 탭 ─────────
+
+public sealed class PlayerRow : CombatStats
+{
+    public long PlayerId { get; init; }
+    public string Name { get; init; } = "";
+    public string Uid { get; init; } = "";
+    public bool IsBot { get; init; }
+    public DateTime FirstSeenKst { get; init; }
+    public DateTime? LastSeenKst { get; init; }
+    public long MatchCount { get; init; }
+
+    /// <summary>활성 밴이 있으면 "밴 (영구)" / "밴 ~ 09-27 18:00", 없으면 빈 문자열</summary>
+    public string BanStatus { get; init; } = "";
+    public bool IsBanned => BanStatus.Length > 0;
+
+    public string PlayerText => $"#{PlayerId} {Name}";
+    public string BotText => IsBot ? "BOT" : "";
+    public string FirstSeenText => FirstSeenKst.ToString("MM-dd HH:mm");
+    public string LastSeenText => LastSeenKst?.ToString("MM-dd HH:mm") ?? "-";
+}
+
+public sealed class PlayerHistoryRow : CombatStats
+{
+    public long MatchId { get; init; }
+    public string Label { get; init; } = "";
+    public DateTime StartKst { get; init; }
+    public DateTime? EndKst { get; init; }
+
+    public string StartText => StartKst.ToString("MM-dd HH:mm");
+    public string DurationText => EndKst is DateTime e ? TimeUtil.Duration(e - StartKst) : "미종료";
 }
