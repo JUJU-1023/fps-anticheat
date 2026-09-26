@@ -141,3 +141,4 @@ game/telemetry/
 # WPF dashboard build output
 tools/dashboard/bin/
 tools/dashboard/obj/
+tools/dashboard/publish/
