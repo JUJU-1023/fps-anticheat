@@ -156,3 +156,69 @@ public sealed class PlayerHistoryRow : CombatStats
     public string StartText => StartKst.ToString("MM-dd HH:mm");
     public string DurationText => EndKst is DateTime e ? TimeUtil.Duration(e - StartKst) : "미종료";
 }
+
+// ───────── 제재 (bans) ─────────
+
+public sealed class BanRow
+{
+    // 상태 코드는 BanRepository의 SQL CASE가 DB 시계 기준으로 계산한다
+    public const string Active = "ACTIVE";
+    public const string Expired = "EXPIRED";
+    public const string Revoked = "REVOKED";
+    public const string KickPending = "KICK_PENDING";
+    public const string KickDone = "KICK_DONE";
+    public const string KickExpired = "KICK_EXPIRED";
+
+    public long Id { get; init; }
+    public long PlayerId { get; init; }
+    public string Action { get; init; } = "";
+    public string Reason { get; init; } = "";
+    public long? ViolationId { get; init; }
+    public DateTime CreatedKst { get; init; }
+    public DateTime? ExpiresKst { get; init; }
+    public DateTime? RevokedKst { get; init; }
+    public DateTime? EnforcedKst { get; init; }
+    public string CreatedBy { get; init; } = "";
+    public string Status { get; init; } = "";
+
+    public bool IsBan => Action == "BAN";
+    public bool IsActive => Status == Active;
+    public bool IsPending => Status == KickPending;
+    /// <summary>유효한 밴, 또는 아직 집행 전인 킥은 해제(취소)할 수 있다</summary>
+    public bool IsRevocable => Status is Active or KickPending;
+
+    public string ActionText => IsBan ? "밴" : "킥";
+    public string PeriodText => !IsBan ? "-" : ExpiresKst is DateTime e ? $"~ {e:MM-dd HH:mm}" : "영구";
+    public string CreatedText => CreatedKst.ToString("MM-dd HH:mm:ss");
+    public string ViolationText => ViolationId is long v ? $"#{v}" : "";
+
+    public string StatusText => Status switch
+    {
+        Active => "유효",
+        Expired => "만료",
+        Revoked => RevokedKst is DateTime r ? $"해제됨 {r:MM-dd HH:mm}" : "해제됨",
+        KickPending => "집행 대기",
+        KickDone => "완료",
+        KickExpired => "미집행 (접속 중 아님)",
+        _ => Status,
+    };
+
+    public string EnforcedText => EnforcedKst is DateTime t ? $"{t:HH:mm:ss}" : IsRevocable ? "대기" : "-";
+}
+
+/// <summary>제재 창의 "근거 위반" 선택지</summary>
+public sealed class ViolationOption
+{
+    public long? Id { get; init; }
+    public string Text { get; init; } = "";
+    public string SuggestedReason { get; init; } = "";
+
+    public static ViolationOption None => new() { Text = "(연결 안 함)" };
+
+    public static ViolationOption From(ViolationRow v) => new()
+    {
+        Id = v.Id,
+        Text = $"#{v.Id}   {v.Code} ×{v.Occurrences:N0}   ·   {v.TimeKst:MM-dd HH:mm:ss}   ·   매치 {v.MatchId}",
+        SuggestedReason = $"{v.Code} ×{v.Occurrences:N0} (매치 {v.MatchId}, 위반 #{v.Id})",
+    };
+}

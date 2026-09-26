@@ -65,42 +65,83 @@
 
             <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch" />
 
-            <!-- 선택한 플레이어의 매치별 이력 -->
+            <!-- 선택한 플레이어: 이력 / 제재 -->
             <DockPanel Grid.Row="2">
                 <DockPanel DockPanel.Dock="Top" Margin="0,6,0,6">
-                    <!-- Day 4: 킥/밴 버튼 자리 -->
-                    <StackPanel x:Name="ActionPanel" DockPanel.Dock="Right" Orientation="Horizontal" />
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <Button x:Name="SanctionButton" Content="킥 / 밴..." Padding="12,3" Margin="8,0,0,0"
+                                FontWeight="SemiBold" IsEnabled="False" Click="Sanction_Click" />
+                        <Button x:Name="RevokeButton" Content="선택한 제재 해제" Padding="12,3" Margin="8,0,0,0"
+                                IsEnabled="False" Click="Revoke_Click" />
+                    </StackPanel>
                     <TextBlock x:Name="DetailHeader" FontWeight="SemiBold" VerticalAlignment="Center"
                                TextTrimming="CharacterEllipsis"
-                               Text="플레이어를 선택하면 매치별 이력이 표시됩니다" />
+                               Text="플레이어를 선택하면 매치별 이력과 제재 이력이 표시됩니다" />
                 </DockPanel>
-                <DataGrid x:Name="HistoryGrid"
-                          AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
-                          HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#E0E0E0">
-                    <DataGrid.RowStyle>
-                        <Style TargetType="DataGridRow">
-                            <Style.Triggers>
-                                <DataTrigger Binding="{Binding HasViolations}" Value="True">
-                                    <Setter Property="Background" Value="#FFEDED" />
-                                </DataTrigger>
-                            </Style.Triggers>
-                        </Style>
-                    </DataGrid.RowStyle>
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="매치" Binding="{Binding MatchId}" Width="56" />
-                        <DataGridTextColumn Header="레이블" Binding="{Binding Label}" Width="70" />
-                        <DataGridTextColumn Header="시작 (KST)" Binding="{Binding StartText}" Width="90" SortMemberPath="StartKst" />
-                        <DataGridTextColumn Header="길이" Binding="{Binding DurationText}" Width="84" />
-                        <DataGridTextColumn Header="발사" Binding="{Binding Fires, StringFormat=N0}" Width="60" />
-                        <DataGridTextColumn Header="명중률" Binding="{Binding AccuracyText}" Width="60" />
-                        <DataGridTextColumn Header="헤드샷률" Binding="{Binding HeadshotText}" Width="66" />
-                        <DataGridTextColumn Header="킬" Binding="{Binding Kills}" Width="44" />
-                        <DataGridTextColumn Header="데스" Binding="{Binding Deaths}" Width="44" />
-                        <DataGridTextColumn Header="평균 RTT" Binding="{Binding RttText}" Width="64" />
-                        <DataGridTextColumn Header="위반 합계" Binding="{Binding ViolationTotal, StringFormat=N0}" Width="72" />
-                        <DataGridTextColumn Header="코드별 위반" Binding="{Binding ViolationText}" Width="*" MinWidth="160" />
-                    </DataGrid.Columns>
-                </DataGrid>
+
+                <TabControl x:Name="DetailTabs">
+                    <TabItem x:Name="HistoryTab" Header="매치별 이력">
+                        <DataGrid x:Name="HistoryGrid"
+                                  AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                                  HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#E0E0E0">
+                            <DataGrid.RowStyle>
+                                <Style TargetType="DataGridRow">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasViolations}" Value="True">
+                                            <Setter Property="Background" Value="#FFEDED" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </DataGrid.RowStyle>
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="매치" Binding="{Binding MatchId}" Width="56" />
+                                <DataGridTextColumn Header="레이블" Binding="{Binding Label}" Width="70" />
+                                <DataGridTextColumn Header="시작 (KST)" Binding="{Binding StartText}" Width="90" SortMemberPath="StartKst" />
+                                <DataGridTextColumn Header="길이" Binding="{Binding DurationText}" Width="84" />
+                                <DataGridTextColumn Header="발사" Binding="{Binding Fires, StringFormat=N0}" Width="60" />
+                                <DataGridTextColumn Header="명중률" Binding="{Binding AccuracyText}" Width="60" />
+                                <DataGridTextColumn Header="헤드샷률" Binding="{Binding HeadshotText}" Width="66" />
+                                <DataGridTextColumn Header="킬" Binding="{Binding Kills}" Width="44" />
+                                <DataGridTextColumn Header="데스" Binding="{Binding Deaths}" Width="44" />
+                                <DataGridTextColumn Header="평균 RTT" Binding="{Binding RttText}" Width="64" />
+                                <DataGridTextColumn Header="위반 합계" Binding="{Binding ViolationTotal, StringFormat=N0}" Width="72" />
+                                <DataGridTextColumn Header="코드별 위반" Binding="{Binding ViolationText}" Width="*" MinWidth="160" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </TabItem>
+
+                    <TabItem x:Name="BansTab" Header="제재 이력">
+                        <DataGrid x:Name="BanGrid"
+                                  AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                                  HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#E0E0E0"
+                                  SelectionChanged="BanGrid_SelectionChanged">
+                            <DataGrid.RowStyle>
+                                <Style TargetType="DataGridRow">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsPending}" Value="True">
+                                            <Setter Property="Background" Value="#FFF4E0" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                            <Setter Property="Background" Value="#FFE3E3" />
+                                            <Setter Property="FontWeight" Value="SemiBold" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </DataGrid.RowStyle>
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="#" Binding="{Binding Id}" Width="44" />
+                                <DataGridTextColumn Header="종류" Binding="{Binding ActionText}" Width="40" />
+                                <DataGridTextColumn Header="기간" Binding="{Binding PeriodText}" Width="100" />
+                                <DataGridTextColumn Header="상태" Binding="{Binding StatusText}" Width="140" />
+                                <DataGridTextColumn Header="집행" Binding="{Binding EnforcedText}" Width="70" />
+                                <DataGridTextColumn Header="사유" Binding="{Binding Reason}" Width="*" MinWidth="160" />
+                                <DataGridTextColumn Header="근거" Binding="{Binding ViolationText}" Width="60" />
+                                <DataGridTextColumn Header="발행 (KST)" Binding="{Binding CreatedText}" Width="110" />
+                                <DataGridTextColumn Header="발행자" Binding="{Binding CreatedBy}" Width="110" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </TabItem>
+                </TabControl>
             </DockPanel>
         </Grid>
 

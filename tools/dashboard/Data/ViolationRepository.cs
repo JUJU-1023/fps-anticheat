@@ -8,6 +8,7 @@ public sealed class ViolationFilter
     public string? Code { get; set; }
     public string? Layer { get; set; }
     public long? MatchId { get; set; }
+    public long? PlayerId { get; set; }
     public bool LatestMatch { get; set; }
     public bool ApplyExclusions { get; set; } = true;
     public int Limit { get; set; } = 300;
@@ -36,6 +37,11 @@ public static class ViolationRepository
         {
             where += " AND v.layer = @layer";
             cmd.Parameters.AddWithValue("@layer", f.Layer);
+        }
+        if (f.PlayerId is long pid)
+        {
+            where += " AND v.player_id = @playerId";
+            cmd.Parameters.AddWithValue("@playerId", pid);
         }
         where += MatchClause(f, cmd);
         if (f.ApplyExclusions) where += Db.Config.ExclusionSql("v");

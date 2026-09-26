@@ -79,7 +79,14 @@
                       AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="False"
                       SelectionMode="Single" HeadersVisibility="Column"
                       GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#E0E0E0"
-                      SelectionChanged="ViolationGrid_SelectionChanged">
+                      SelectionChanged="ViolationGrid_SelectionChanged"
+                      PreviewMouseRightButtonDown="ViolationGrid_PreviewMouseRightButtonDown"
+                      MouseDoubleClick="ViolationGrid_MouseDoubleClick">
+                <DataGrid.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem x:Name="SanctionMenuItem" Header="이 플레이어 킥 / 밴..." Click="Sanction_Click" />
+                    </ContextMenu>
+                </DataGrid.ContextMenu>
                 <DataGrid.RowStyle>
                     <Style TargetType="DataGridRow">
                         <Style.Triggers>
@@ -118,9 +125,13 @@
             <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" />
 
             <DockPanel Grid.Column="2">
-                <TextBlock x:Name="DetailHeader" DockPanel.Dock="Top" Margin="8,0,0,6"
-                           FontWeight="SemiBold" TextWrapping="Wrap"
-                           Text="행을 선택하면 상세가 표시됩니다" />
+                <DockPanel DockPanel.Dock="Top" Margin="8,0,0,6">
+                    <Button x:Name="SanctionButton" DockPanel.Dock="Right" Content="이 플레이어 킥 / 밴..."
+                            Padding="10,3" Margin="8,0,0,0" FontWeight="SemiBold"
+                            IsEnabled="False" Click="Sanction_Click" />
+                    <TextBlock x:Name="DetailHeader" FontWeight="SemiBold" TextWrapping="Wrap"
+                               VerticalAlignment="Center" Text="행을 선택하면 상세가 표시됩니다" />
+                </DockPanel>
                 <TextBox x:Name="DetailBox" Margin="8,0,0,0" IsReadOnly="True"
                          FontFamily="Consolas" FontSize="13" TextWrapping="Wrap"
                          VerticalScrollBarVisibility="Auto" />

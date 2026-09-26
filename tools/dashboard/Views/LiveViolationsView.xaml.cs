@@ -4,6 +4,8 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using AntiCheatDashboard.Data;
 
@@ -38,6 +40,9 @@ public partial class LiveViolationsView : UserControl
     private bool _suppress;            // 코드로 선택을 바꾸는 동안 이벤트 무시
     private bool _busy;
     private bool _pending;
+
+    private string? _flash;            // 제재 발행 직후 상태줄에 잠깐 붙일 문구
+    private DateTime _flashUntil;
 
     public LiveViolationsView()
     {
@@ -103,6 +108,35 @@ public partial class LiveViolationsView : UserControl
         ShowDetail(row);
     }
 
+    // ───────── 제재 ─────────
+
+    // WPF DataGrid는 우클릭으로 행을 선택하지 않으므로, 메뉴를 열기 전에 그 행을 선택해 둔다
+    private void ViolationGrid_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        var dep = e.OriginalSource as DependencyObject;
+        while (dep != null && dep is not DataGridRow)
+            dep = VisualTreeHelper.GetParent(dep);
+        if (dep is DataGridRow row) row.IsSelected = true;
+
+        SanctionMenuItem.IsEnabled = ViolationGrid.SelectedItem is ViolationRow { IsBot: false };
+    }
+
+    private void ViolationGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => OpenSanctionDialog();
+
+    private void Sanction_Click(object sender, RoutedEventArgs e) => OpenSanctionDialog();
+
+    private void OpenSanctionDialog()
+    {
+        if (ViolationGrid.SelectedItem is not ViolationRow { IsBot: false } v) return;
+
+        var dialog = new BanDialog(v.PlayerId, v.PlayerText, v.Id) { Owner = Window.GetWindow(this) };
+        if (dialog.ShowDialog() != true) return;
+
+        _flash = dialog.ResultSummary;
+        _flashUntil = DateTime.Now.AddSeconds(15);
+        _ = RefreshAsync(force: true);
+    }
+
     // ───────── 갱신 ─────────
 
     private async Task RefreshAsync(bool force)
@@ -153,6 +187,7 @@ public partial class LiveViolationsView : UserControl
                           : filter.MatchId is long mid ? $"매치 #{mid}"
                           : "전체 매치";
             StatusLine.Text =
+                (_flash != null && now < _flashUntil ? $"{_flash} · " : "") +
                 $"마지막 갱신 {now:HH:mm:ss} · {matchDesc} · {rows.Count}행 (최대 {filter.Limit})" +
                 (newCount > 0 ? $" · 새 위반 {newCount}건" : "") +
                 (PauseBox.IsChecked == true ? " · 일시정지 중" : $" · {Db.Config.PollSeconds}초마다 갱신");
@@ -253,6 +288,7 @@ public partial class LiveViolationsView : UserControl
 
     private void ShowDetail(ViolationRow? r)
     {
+        SanctionButton.IsEnabled = r is { IsBot: false };
         if (r is null)
         {
             DetailHeader.Text = "행을 선택하면 상세가 표시됩니다";
