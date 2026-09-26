@@ -1,0 +1,131 @@
+<UserControl x:Class="AntiCheatDashboard.Views.LiveViolationsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Loaded="OnLoaded" Unloaded="OnUnloaded">
+    <DockPanel>
+
+        <!-- 필터 바 -->
+        <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+            <TextBlock Text="매치" VerticalAlignment="Center" Margin="0,0,6,0" />
+            <ComboBox x:Name="MatchBox" Width="300" Margin="0,0,16,0"
+                      DisplayMemberPath="Text" SelectionChanged="Filter_SelectionChanged" />
+
+            <TextBlock Text="코드" VerticalAlignment="Center" Margin="0,0,6,0" />
+            <ComboBox x:Name="CodeBox" Width="140" Margin="0,0,16,0"
+                      SelectionChanged="Filter_SelectionChanged" />
+
+            <TextBlock Text="레이어" VerticalAlignment="Center" Margin="0,0,6,0" />
+            <ComboBox x:Name="LayerBox" Width="70" Margin="0,0,16,0"
+                      SelectionChanged="Filter_SelectionChanged">
+                <ComboBoxItem Content="전체" IsSelected="True" />
+                <ComboBoxItem Content="L1" />
+                <ComboBoxItem Content="L2" />
+                <ComboBoxItem Content="L3" />
+            </ComboBox>
+
+            <TextBlock Text="집계 구간" VerticalAlignment="Center" Margin="0,0,6,0" />
+            <ComboBox x:Name="WindowBox" Width="90" Margin="0,0,16,0"
+                      SelectionChanged="Filter_SelectionChanged">
+                <ComboBoxItem Content="10분" Tag="10" />
+                <ComboBoxItem Content="1시간" Tag="60" />
+                <ComboBoxItem Content="24시간" Tag="1440" />
+                <ComboBoxItem Content="전체" Tag="" IsSelected="True" />
+            </ComboBox>
+
+            <CheckBox x:Name="ExcludeBox" Content="오염 데이터 제외" IsChecked="True"
+                      VerticalAlignment="Center" Margin="0,0,16,0"
+                      Checked="Filter_Toggled" Unchecked="Filter_Toggled" />
+            <CheckBox x:Name="PauseBox" Content="일시정지" VerticalAlignment="Center" Margin="0,0,16,0" />
+            <Button Content="새로고침" Padding="10,2" Click="Refresh_Click" />
+        </WrapPanel>
+
+        <!-- 코드별 요약 카드 (클릭하면 코드 필터 토글) -->
+        <ItemsControl x:Name="SummaryList" DockPanel.Dock="Top" Margin="0,0,0,8">
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <WrapPanel />
+                </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                    <Button Click="SummaryCard_Click" Tag="{Binding Code}" Margin="0,0,8,4"
+                            Padding="12,6" MinWidth="140" HorizontalContentAlignment="Left">
+                        <StackPanel>
+                            <TextBlock Text="{Binding Code}" FontWeight="SemiBold" />
+                            <TextBlock>
+                                <Run Text="{Binding Total, Mode=OneWay}" FontSize="20" FontWeight="SemiBold" />
+                                <Run Text=" 회 · " />
+                                <Run Text="{Binding Players, Mode=OneWay}" />
+                                <Run Text="명" />
+                            </TextBlock>
+                        </StackPanel>
+                    </Button>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <!-- 상태줄 -->
+        <TextBlock x:Name="StatusLine" DockPanel.Dock="Bottom" Margin="0,6,0,0" Foreground="Gray" />
+
+        <!-- 목록 + 상세 -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="3*" />
+                <ColumnDefinition Width="5" />
+                <ColumnDefinition Width="2*" />
+            </Grid.ColumnDefinitions>
+
+            <DataGrid x:Name="ViolationGrid" Grid.Column="0"
+                      AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="False"
+                      SelectionMode="Single" HeadersVisibility="Column"
+                      GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#E0E0E0"
+                      SelectionChanged="ViolationGrid_SelectionChanged">
+                <DataGrid.RowStyle>
+                    <Style TargetType="DataGridRow">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding Severity}" Value="2">
+                                <Setter Property="Background" Value="#FFF4E0" />
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding Severity}" Value="3">
+                                <Setter Property="Background" Value="#FFE3E3" />
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding IsNew}" Value="True">
+                                <Setter Property="FontWeight" Value="Bold" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </DataGrid.RowStyle>
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="" Binding="{Binding NewMark}" Width="22">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Foreground" Value="#E53935" />
+                                <Setter Property="HorizontalAlignment" Value="Center" />
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Header="시각 (KST)" Binding="{Binding TimeText}" Width="140" />
+                    <DataGridTextColumn Header="매치" Binding="{Binding MatchText}" Width="100" />
+                    <DataGridTextColumn Header="플레이어" Binding="{Binding PlayerText}" Width="*" MinWidth="120" />
+                    <DataGridTextColumn Header="코드" Binding="{Binding Code}" Width="100" />
+                    <DataGridTextColumn Header="L" Binding="{Binding Layer}" Width="32" />
+                    <DataGridTextColumn Header="심각도" Binding="{Binding Severity}" Width="52" />
+                    <DataGridTextColumn Header="횟수" Binding="{Binding Occurrences}" Width="52" />
+                    <DataGridTextColumn Header="RTT" Binding="{Binding RttText}" Width="52" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" />
+
+            <DockPanel Grid.Column="2">
+                <TextBlock x:Name="DetailHeader" DockPanel.Dock="Top" Margin="8,0,0,6"
+                           FontWeight="SemiBold" TextWrapping="Wrap"
+                           Text="행을 선택하면 상세가 표시됩니다" />
+                <TextBox x:Name="DetailBox" Margin="8,0,0,0" IsReadOnly="True"
+                         FontFamily="Consolas" FontSize="13" TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto" />
+            </DockPanel>
+        </Grid>
+
+    </DockPanel>
+</UserControl>

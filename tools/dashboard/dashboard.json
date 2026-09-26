@@ -3,5 +3,11 @@
   "Port": 3306,
   "Database": "anticheat",
   "User": "dash",
-  "Password": "1234"
+  "Password": "1234",
+
+  "PollSeconds": 3,
+  "MaxRows": 300,
+
+  "ExcludedPlayerIds": [13, 14, 15, 16, 17, 18, 21, 22],
+  "ExcludedMatchIds": [97, 98]
 }

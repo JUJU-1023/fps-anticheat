@@ -1,8 +1,9 @@
 <Window x:Class="AntiCheatDashboard.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Anti-Cheat Dashboard" Width="1280" Height="800"
-        MinWidth="960" MinHeight="600"
+        xmlns:views="clr-namespace:AntiCheatDashboard.Views"
+        Title="Anti-Cheat Dashboard" Width="1400" Height="860"
+        MinWidth="1024" MinHeight="600"
         Loaded="Window_Loaded">
     <DockPanel>
 
@@ -28,8 +29,8 @@
 
         <!-- 본문 탭 -->
         <TabControl x:Name="Tabs" Margin="8">
-            <TabItem Header="실시간 위반">
-                <TextBlock Text="Day 2" Margin="16" Foreground="Gray" />
+            <TabItem x:Name="LiveTab" Header="실시간 위반">
+                <views:LiveViolationsView Margin="8" />
             </TabItem>
             <TabItem Header="세션">
                 <TextBlock Text="Day 3" Margin="16" Foreground="Gray" />

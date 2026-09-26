@@ -13,21 +13,25 @@ public partial class MainWindow : Window
         ServerText.Text = Db.Config.Display;
     }
 
-    private async void Window_Loaded(object sender, RoutedEventArgs e) => await RunTestAsync();
+    // 시작할 때: 진단은 조용히 돌리고, 통과하면 실시간 탭에 머무름. 실패하면 진단 탭으로.
+    private async void Window_Loaded(object sender, RoutedEventArgs e) => await RunTestAsync(showDiag: false);
 
-    private async void TestButton_Click(object sender, RoutedEventArgs e) => await RunTestAsync();
+    // 버튼으로 돌릴 때: 항상 진단 탭을 보여줌
+    private async void TestButton_Click(object sender, RoutedEventArgs e) => await RunTestAsync(showDiag: true);
 
-    private async Task RunTestAsync()
+    private async Task RunTestAsync(bool showDiag)
     {
         TestButton.IsEnabled = false;
         StatusDot.Fill = Brushes.Gray;
         StatusText.Text = "연결 테스트 중...";
-        DiagTab.IsSelected = true;
+        if (showDiag) DiagTab.IsSelected = true;
         DiagOutput.Text = "";
 
+        var ok = false;
         try
         {
-            var (ok, lines) = await ConnectionTest.RunAsync();
+            var (passed, lines) = await ConnectionTest.RunAsync();
+            ok = passed;
             DiagOutput.Text = string.Join(Environment.NewLine, lines);
             StatusDot.Fill = ok ? Brushes.LimeGreen : Brushes.Orange;
             StatusText.Text = ok ? "연결됨 · 권한 정상" : "연결됨 · 권한 확인 필요";
@@ -48,5 +52,7 @@ public partial class MainWindow : Window
         {
             TestButton.IsEnabled = true;
         }
+
+        if (!ok) DiagTab.IsSelected = true;
     }
 }
