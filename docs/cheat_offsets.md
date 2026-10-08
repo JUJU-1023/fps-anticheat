@@ -23,3 +23,12 @@
 - 타입: int (4 bytes)
 - 재시작 검증: 통과 (2026-09-27, 게임 2회 실행에서 동일 오프셋에 틱 존재)
 - 용도: 값을 앞으로 밀면 input.tick 이 점프 → V-MOVE RateExceeded(스피드핵) / V-FIRE 버킷(연사핵)
+
+### currentYaw / currentPitch (에임핵) — W10
+- 모듈: `mono-2.0-bdwgc.dll`
+- Base 오프셋: `0x764290`
+- 포인터 체인: [+0x280] [+0x1D0] [+0xC0] [+0x14C] → currentYaw (float)
+- currentPitch = 같은 체인, 마지막 +0x150 (yaw 필드 바로 뒤, 4바이트)
+- 재시작 검증: pointermap 2회 비교 통과 (yaw_final3.PTR)
+- 서버 반영 검증: yaw 180 / pitch 45 → combat_events 에 그대로 기록됨
+- 용도: input.yaw/pitch 에 직접 담겨 전송 → 서버 히트스캔 방향 조작 → V-TIME / aim_error 탐지
