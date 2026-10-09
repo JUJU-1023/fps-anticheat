@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using CheatClient.Native;
 
 namespace CheatClient.Core;
@@ -17,10 +18,17 @@ namespace CheatClient.Core;
 ///   - TryRead / TryReadBytes. 스캔 후보 검증처럼 실패가 흔한 경로에서
 ///     예외를 던지지 않는다.
 ///   - EnumerateWritableRegions. 적 보간기 vtable 스캔용.
+///
+/// W11 Day 4 추가
+///   - FindGameWindow / TryGetClientScreenRect. ESP 오버레이를 게임 화면 위에
+///     정확히 겹치기 위해 게임 창의 클라이언트 영역을 화면 좌표로 읽는다.
 /// </summary>
 public sealed class GameProcess : IDisposable
 {
     public const string ProcessName = "Game";   // Game.exe
+
+    /// <summary>Unity 스탠드얼론 플레이어의 메인 창 클래스 이름.</summary>
+    private const string UnityWindowClass = "UnityWndClass";
 
     // docs/cheat_offsets.md 와 반드시 일치. 하나라도 다르면 체인이 무효이므로 거부.
     private static readonly (string rel, string sha)[] ExpectedHashes =
@@ -35,6 +43,7 @@ public sealed class GameProcess : IDisposable
 
     private Process? _proc;
     private IntPtr _handle = IntPtr.Zero;
+    private IntPtr _gameWnd = IntPtr.Zero;
 
     private readonly Dictionary<string, IntPtr> _moduleCache =
         new(StringComparer.OrdinalIgnoreCase);
@@ -120,6 +129,63 @@ public sealed class GameProcess : IDisposable
             }
         }
         throw new InvalidOperationException($"모듈을 찾을 수 없음: {moduleName}");
+    }
+
+    // --- 게임 창 (W11 Day 4, ESP 오버레이용) ---
+
+    /// <summary>
+    /// 게임의 메인 창 핸들. 이 프로세스가 만든 보이는 UnityWndClass 창을 찾는다.
+    /// 찾은 핸들은 캐시하고, 창이 사라졌을 때만 다시 찾는다. 없으면 IntPtr.Zero.
+    ///
+    /// Process.MainWindowHandle 은 Refresh() 를 안 하면 갱신되지 않고,
+    /// 로딩 창 같은 다른 창을 잡을 수 있어서 쓰지 않는다.
+    /// </summary>
+    public IntPtr FindGameWindow()
+    {
+        if (_proc == null) return IntPtr.Zero;
+        if (_gameWnd != IntPtr.Zero && Win32.IsWindow(_gameWnd)) return _gameWnd;
+
+        uint pid = (uint)_proc.Id;
+        IntPtr found = IntPtr.Zero;
+        var cls = new StringBuilder(64);
+
+        Win32.EnumWindows((hWnd, _) =>
+        {
+            Win32.GetWindowThreadProcessId(hWnd, out uint owner);
+            if (owner != pid || !Win32.IsWindowVisible(hWnd)) return true;
+
+            cls.Clear();
+            Win32.GetClassName(hWnd, cls, cls.Capacity);
+            if (cls.ToString() != UnityWindowClass) return true;
+
+            found = hWnd;
+            return false;   // 찾았으니 열거 중단
+        }, IntPtr.Zero);
+
+        _gameWnd = found;
+        return found;
+    }
+
+    /// <summary>
+    /// 게임 창 클라이언트 영역(테두리·제목줄 제외, 실제로 그려지는 부분)의
+    /// 화면 좌표. 단위는 물리 픽셀. 창이 없거나 최소화돼 있으면 false.
+    /// </summary>
+    public bool TryGetClientScreenRect(out int x, out int y, out int width, out int height)
+    {
+        x = y = width = height = 0;
+
+        IntPtr hWnd = FindGameWindow();
+        if (hWnd == IntPtr.Zero || Win32.IsIconic(hWnd)) return false;
+        if (!Win32.GetClientRect(hWnd, out var rc)) return false;
+
+        var origin = new Win32.POINT { X = 0, Y = 0 };
+        if (!Win32.ClientToScreen(hWnd, ref origin)) return false;
+
+        x = origin.X;
+        y = origin.Y;
+        width = rc.Right - rc.Left;
+        height = rc.Bottom - rc.Top;
+        return width > 0 && height > 0;
     }
 
     // --- 메모리 읽기/쓰기 ---
@@ -229,6 +295,7 @@ public sealed class GameProcess : IDisposable
         if (_handle != IntPtr.Zero) { Win32.CloseHandle(_handle); _handle = IntPtr.Zero; }
         _proc?.Dispose();
         _proc = null;
+        _gameWnd = IntPtr.Zero;
         lock (_moduleCache) _moduleCache.Clear();
     }
 }

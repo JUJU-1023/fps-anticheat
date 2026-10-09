@@ -1,7 +1,7 @@
 <Window x:Class="CheatClient.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Cheat Client (외부) — W11 에임핵" Height="620" Width="500"
+        Title="Cheat Client (외부) — 에임핵 · ESP · 트리거봇" Height="760" Width="500"
         WindowStartupLocation="CenterScreen" ResizeMode="CanMinimize">
     <Grid Margin="16">
         <Grid.RowDefinitions>
@@ -48,6 +48,42 @@
             <TextBlock Text="※ 조준 고정: 위 각도로 잠김. 서버 input.yaw/pitch 에 반영됨."
                        FontSize="10" Foreground="#888" Margin="0,4,0,0"/>
             <TextBlock Text="※ 자동 조준: 우클릭 누르는 동안 조준선 30° 안 가장 가까운 적 몸통을 겨눔."
+                       FontSize="10" Foreground="#888" Margin="0,2,0,0"/>
+
+            <!-- W11 Day 4 : 월핵 ESP. 에임핵과 동시에 켤 수 있다 -->
+            <TextBlock Text="월핵" FontWeight="Bold" Margin="0,12,0,6"/>
+            <StackPanel Orientation="Horizontal">
+                <ToggleButton x:Name="EspToggle" Content="ESP" Width="120" Height="30"
+                              IsEnabled="False"
+                              Checked="OnEspChecked" Unchecked="OnEspUnchecked"/>
+                <!-- W11 Day 4b : 회전 지연 보정. 켜져 있는 동안 바로 반영된다 -->
+                <TextBlock Text="예측(ms)" VerticalAlignment="Center" Margin="12,0,4,0"/>
+                <TextBox x:Name="EspLeadBox" Text="0" Width="50" Height="26"
+                         VerticalContentAlignment="Center"
+                         TextChanged="OnEspLeadChanged"/>
+            </StackPanel>
+            <TextBlock Text="※ ESP: 게임 화면 위 투명 오버레이. 게임 창이 맨 앞일 때만 보임. 메모리 쓰기 없음."
+                       FontSize="10" Foreground="#888" Margin="0,4,0,0"/>
+            <TextBlock Text="※ 예측: 돌릴 때 박스가 늦게 따라오면 +, 먼저 가면 − (−150~150)."
+                       FontSize="10" Foreground="#888" Margin="0,2,0,0"/>
+
+            <!-- W12 : 트리거봇. 에임핵·ESP 와 동시에 켤 수 있다 -->
+            <TextBlock Text="트리거봇" FontWeight="Bold" Margin="0,12,0,6"/>
+            <StackPanel Orientation="Horizontal">
+                <ToggleButton x:Name="TriggerToggle" Content="트리거봇" Width="120" Height="30"
+                              IsEnabled="False"
+                              Checked="OnTriggerChecked" Unchecked="OnTriggerUnchecked"/>
+                <TextBlock Text="반응 지연(ms)" VerticalAlignment="Center" Margin="12,0,4,0"/>
+                <TextBox x:Name="TriggerDelayBox" Text="0" Width="50" Height="26"
+                         VerticalContentAlignment="Center"
+                         TextChanged="OnTriggerDelayChanged"/>
+                <CheckBox x:Name="TriggerHeadOnly" Content="머리만" VerticalAlignment="Center"
+                          Margin="12,0,0,0"
+                          Checked="OnTriggerHeadOnlyChanged" Unchecked="OnTriggerHeadOnlyChanged"/>
+            </StackPanel>
+            <TextBlock Text="※ 트리거봇: 조준선이 적 히트박스 위에 있는 동안 자동 발사(OS 입력). 게임이 맨 앞일 때만."
+                       FontSize="10" Foreground="#888" Margin="0,4,0,0"/>
+            <TextBlock Text="※ 반응 지연: 0 = 즉시(V-TIME 시연). 값을 주면 그만큼 겹쳐 있어야 쏨(사람 흉내)."
                        FontSize="10" Foreground="#888" Margin="0,2,0,0"/>
         </StackPanel>
 
