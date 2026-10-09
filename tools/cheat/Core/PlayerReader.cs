@@ -76,7 +76,9 @@ internal sealed class EnemyTrack
 ///   보간기가 화면에 그리는 시점이고, 서버 랙 보상이 되감는 시점과 같다.
 ///   최신 슬롯을 겨누면 100ms 앞을 쏘게 되어 움직이는 적에게 빗나간다.
 ///
-///   슬롯의 tick 이 기대값과 다르면 버린다. 보간기 자신도 같은 검증을 한다.
+///   슬롯의 tick 이 기대값과 다르면 한 칸씩 과거로 가며 채워진 슬롯을 찾는다
+///   (최대 MaxSlotBack 칸). 서버가 원격 상태를 매 틱 보내지 않으면 정확한
+///   슬롯이 비어 있는 경우가 많아, 이게 없으면 조준이 붙었다 떨어졌다 한다.
 ///
 ///   ★ 적 버퍼는 캐시하지 않는다 ★ ClearBuffer() 가 스폰·리스폰마다
 ///   new CircularBuffer 를 만들어 주소가 바뀐다. 매번 RPI 부터 다시 따라간다.
@@ -88,6 +90,9 @@ internal sealed class EnemyTrack
 ///     3. 버퍼 구조(size 1024, 배열 길이 1024)로 걸러낸다.
 ///   살아 있는지는 latestTick 이 계속 오르는지로 판단한다. 사망 중인 적은
 ///   입력을 안 보내서 latestTick 이 멈추므로 자연스럽게 빠진다.
+///
+/// ─ 진단 (W11 Day 2) ─
+///   ReadLiveEnemies 의 각 단계 결과를 센다. TakeDiag() 가 문자열로 돌려주고 0 으로 되돌린다.
 /// </summary>
 public sealed class PlayerReader : IDisposable
 {
@@ -100,6 +105,7 @@ public sealed class PlayerReader : IDisposable
     private const int  ScanIntervalMs = 5000;
     private const int  ScanChunkBytes = 4 * 1024 * 1024;
     private const long StaleAfterMs   = 1000;
+    private const int  MaxSlotBack    = 12;     // 200ms 까지 과거로 폴백
 
     private readonly GameProcess _game;
     private readonly Action<string> _log;
@@ -113,6 +119,10 @@ public sealed class PlayerReader : IDisposable
     private volatile bool _running;
     private int _lastLoggedCount = -1;
 
+    // ── 진단 카운터 ──
+    private int _dLtFail, _dNotLive, _dExact, _dFallback, _dMiss, _dMaxBack;
+    private int _dLastLt = int.MinValue;
+
     public PlayerReader(GameProcess game, Action<string> log)
     {
         _game = game;
@@ -125,6 +135,28 @@ public sealed class PlayerReader : IDisposable
 
     /// <summary>스캔으로 찾은 보간기 수 (살아 있지 않은 것 포함).</summary>
     public int TrackedCount => _tracks.Length;
+
+    /// <summary>
+    /// 마지막 호출 이후 ReadLiveEnemies 결과 집계. 부르면 0 으로 되돌린다.
+    ///   lt읽기X  latestTick 읽기 실패 (객체가 해제됨)
+    ///   생존X    latestTick 이 1초 넘게 안 바뀜 (사망 · 또는 정지 중 상태 미전송)
+    ///   정확     latestTick-6 슬롯이 그대로 있었음
+    ///   폴백     더 과거 슬롯을 썼음 (최대 몇 칸까지 갔는지 함께 표시)
+    ///   슬롯X    MaxSlotBack 칸 안에 채워진 슬롯 없음
+    /// </summary>
+    public string TakeDiag()
+    {
+        int ltFail  = Interlocked.Exchange(ref _dLtFail, 0);
+        int notLive = Interlocked.Exchange(ref _dNotLive, 0);
+        int exact   = Interlocked.Exchange(ref _dExact, 0);
+        int fb      = Interlocked.Exchange(ref _dFallback, 0);
+        int miss    = Interlocked.Exchange(ref _dMiss, 0);
+        int maxBack = Interlocked.Exchange(ref _dMaxBack, 0);
+        int lastLt  = Volatile.Read(ref _dLastLt);
+
+        return $"추적 {_tracks.Length} · lt읽기X {ltFail} · 생존X {notLive} · " +
+               $"정확 {exact} · 폴백 {fb}(최대 {maxBack}칸) · 슬롯X {miss} · latestTick {lastLt}";
+    }
 
     // -----------------------------------------------------------------
     //  내 위치
@@ -185,7 +217,12 @@ public sealed class PlayerReader : IDisposable
         foreach (var t in _tracks)
         {
             var rpi = new IntPtr(t.Rpi);
-            if (!_game.TryRead(rpi + MonoOffsets.RPI_LatestTick, out int lt)) continue;
+            if (!_game.TryRead(rpi + MonoOffsets.RPI_LatestTick, out int lt))
+            {
+                Interlocked.Increment(ref _dLtFail);
+                continue;
+            }
+            Volatile.Write(ref _dLastLt, lt);
 
             bool live;
             lock (t)
@@ -206,24 +243,54 @@ public sealed class PlayerReader : IDisposable
                 live = now - t.LastChangeMs <= StaleAfterMs;
             }
 
-            if (!live || lt < MonoOffsets.InterpDelayTicks) continue;
+            if (!live || lt < MonoOffsets.InterpDelayTicks)
+            {
+                Interlocked.Increment(ref _dNotLive);
+                continue;
+            }
 
-            if (TryReadSlot(rpi, lt - MonoOffsets.InterpDelayTicks, out var s))
+            if (TryReadSlot(rpi, lt - MonoOffsets.InterpDelayTicks, out var s, out int back))
+            {
+                if (back == 0) Interlocked.Increment(ref _dExact);
+                else
+                {
+                    Interlocked.Increment(ref _dFallback);
+                    if (back > Volatile.Read(ref _dMaxBack)) Volatile.Write(ref _dMaxBack, back);
+                }
                 result.Add(new EnemySnapshot(rpi, s));
+            }
+            else
+            {
+                Interlocked.Increment(ref _dMiss);
+            }
         }
         return result;
     }
 
-    private bool TryReadSlot(IntPtr rpi, int tick, out StatePayloadRaw s)
+    /// <summary>
+    /// tick 슬롯을 읽는다. 비어 있거나 옛 값이면 한 칸씩 과거로 가며 찾는다.
+    /// back = 몇 칸 과거를 썼는지 (0 = 정확).
+    /// </summary>
+    private bool TryReadSlot(IntPtr rpi, int tick, out StatePayloadRaw s, out int back)
     {
         s = default;
+        back = -1;
         if (!_game.TryRead(rpi + MonoOffsets.RPI_StateBuffer, out long cb) || cb == 0) return false;
         if (!_game.TryRead(new IntPtr(cb + MonoOffsets.CB_Array), out long arr) || arr == 0) return false;
 
-        long addr = arr + MonoOffsets.Arr_Data + (long)(tick % MonoOffsets.BufferSize) * MonoOffsets.ElemSize;
-        if (!_game.TryRead(new IntPtr(addr), out s)) return false;
-
-        return s.Tick == tick;   // 빈 슬롯·옛 값이면 버린다
+        for (int k = 0; k <= MaxSlotBack && tick - k >= 0; k++)
+        {
+            int want = tick - k;
+            long addr = arr + MonoOffsets.Arr_Data + (long)(want % MonoOffsets.BufferSize) * MonoOffsets.ElemSize;
+            if (!_game.TryRead(new IntPtr(addr), out s)) return false;
+            if (s.Tick == want)
+            {
+                back = k;
+                return true;
+            }
+        }
+        s = default;
+        return false;
     }
 
     // -----------------------------------------------------------------

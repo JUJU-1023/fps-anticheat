@@ -25,6 +25,7 @@ public partial class MainWindow : Window
         _display.Tick += (_, _) => RefreshStatus();
         Closed += (_, _) =>
         {
+            _display.Stop();
             _lock?.Stop();
             _reader?.Dispose();
             _game.Dispose();
@@ -40,7 +41,10 @@ public partial class MainWindow : Window
             _aim = new AimCheat(_game);
             _lock = new AimLock(_aim, LogFromAnyThread);
             _reader = new PlayerReader(_game, LogFromAnyThread);
-            _auto = new AutoAim(_reader, _aim);
+            _auto = new AutoAim(_reader, _aim)
+            {
+                Log = LogFromAnyThread   // W11 Day 2: 1초 단위 자동 조준 진단
+            };
 
             var monoBase = _game.GetModuleBase("mono-2.0-bdwgc.dll");
 
@@ -89,6 +93,7 @@ public partial class MainWindow : Window
             ? $"내 위치: ({me.Position.X:F2}, {me.Position.Y:F2}, {me.Position.Z:F2})"
             : "내 위치: (읽기 실패)";
 
+        // ※ 이 호출도 PlayerReader 진단 카운터에 섞인다 (초당 5회, 자동 조준은 초당 약 125회).
         var enemies = _reader.ReadLiveEnemies();
         var lines = enemies.Select(e =>
             $"  ({e.State.Position.X:F2}, {e.State.Position.Y:F2}, {e.State.Position.Z:F2}) tick {e.State.Tick}");
@@ -126,6 +131,7 @@ public partial class MainWindow : Window
 
         _lock.SetProvider(_auto.TryGetAim);
         _lock.Start();
+        Log("[자동조준] 켜짐 — 우클릭을 누르고 있는 동안 1초마다 진단 출력");
     }
 
     private void OnAutoUnchecked(object sender, RoutedEventArgs e)
@@ -144,8 +150,18 @@ public partial class MainWindow : Window
     // --- 로그 ---
 
     private void Log(string msg)
-        => LogBox.AppendText($"{DateTime.Now:HH:mm:ss}  {msg}\n");
+    {
+        LogBox.AppendText($"{DateTime.Now:HH:mm:ss}  {msg}\n");
+        LogBox.ScrollToEnd();
+    }
 
+    /// <summary>
+    /// 백그라운드 스레드(AimLock 루프, 스캔 스레드)에서 부른다.
+    /// Invoke(동기)가 아니라 BeginInvoke(비동기)를 쓴다. 동기로 부르면
+    ///   - 125Hz 조준 루프가 매 로그마다 UI 스레드를 기다려 끊기고,
+    ///   - 창을 닫을 때 UI 스레드가 _lock.Stop() 에서 루프 종료를 기다리는 동안
+    ///     루프는 UI 스레드를 기다려 서로 멈출 수 있다(교착).
+    /// </summary>
     private void LogFromAnyThread(string msg)
-        => Dispatcher.Invoke(() => Log(msg));
+        => Dispatcher.BeginInvoke(() => Log(msg));
 }
