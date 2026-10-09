@@ -152,6 +152,20 @@ ssh game@100.116.18.41 'sudo systemctl restart gameserver && sleep 6 && grep -m1
 
 **조치**: 기록만.
 
+### W12 Day3 변경: 차폐 추적 = "콘 안 체류" → "따라다님"
+- 발견: match 135/136 모서리 대기 시나리오에서 V-LOS 13건. 틱 기준 확인 결과
+  13건 모두 사수 조준 고정(yaw ≤1.5°), 적 정지 7 / 1.9m 이하 이동 6.
+- 원인: 누적 조건이 "차폐 && 조준 5° 안"뿐이라 겨누고 기다리기만 해도 2초가 참.
+- 수정: 루프마다 Follow(적 스스로 각속도 ≥2°/s 이고 조준이 ≥50% 따라감 → 누적)
+  / Hold(적 각도상 정지·표본 없음 → 유지) / Decay(그 외 → 감쇠).
+- 검증: V1 모서리 대기 오탐 0, V2 자동 조준 벽 뒤 추적 탐지 유지.
+- 주의: violations.server_time 은 판정 시각보다 늦게 찍힌다.
+  다른 테이블과 시점을 맞출 때는 first_tick ↔ movement_samples.server_tick 을 쓴다.
+- 잠정값: MinTargetAngVelDeg 2, FollowRatio 0.5, TrackViolationSec 2.0
+
+
+
+
 ---
 
 ### V-TIME-01 — 반응시간 검증
@@ -160,6 +174,7 @@ ssh game@100.116.18.41 'sudo systemctl restart gameserver && sleep 6 && grep -m1
 |---|---|---|
 | `ThresholdMs` | 110ms | 인간 시각-운동 반응 하한 |
 | `SpotQuantizationMs` | 50ms | 20Hz 루프 주기. 측정치가 실제보다 최대 이만큼 빠르다 |
+
 | **실효 임계** | **60ms** | 110 − 50 |
 | `EngagementWindowSec` | 3.0s | 재조우 판정 (5.1 참조) |
 | `WindowSize` / `RepeatLimit` | 20 / 5 | 최근 20회 중 5회 이상이면 심각도 상향 |

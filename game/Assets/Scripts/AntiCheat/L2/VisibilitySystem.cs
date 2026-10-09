@@ -40,7 +40,7 @@
 //
 //  ─────────────────────────────────────────────────────────────────
 //  W7 Day 3 : V-LOS-01 위반 발화
-//  W7 Day 4 : SPOT 텔레메트리 방출  ← 이번 변경
+//  W7 Day 4 : SPOT 텔레메트리 방출
 //
 //   SPOT 을 combat_events 에 event_type='SPOT' 으로 남긴다.
 //   위반만 기록하면 정상 플레이어의 반응시간 분포가 없어서
@@ -48,6 +48,39 @@
 //   반응시간은 SQL 에서 유도한다.
 //     fire.server_time - spot.server_time - fire.rtt_ms/2
 //   전환 시에만 발생하므로 볼륨은 작다.
+//
+//  ─────────────────────────────────────────────────────────────────
+//  W12 Day 3 : 차폐 추적을 "콘 안 체류"에서 "따라다님"으로 수정  ← 이번 변경
+//
+//   발견
+//    트리거봇 측정(match 135/136, 모서리 대기 시나리오)에서 V-LOS 13건.
+//    틱 기준(first_tick 직전 120틱) 확인 결과 13건 모두 사수 조준이 고정
+//    (yaw 변화 ≤ 1.5°)이었다. 적은 7건 정지, 6건 1.9m 이하 이동.
+//    사람 대조(137)가 0건이었던 건 조준 위치·적 대기 위치 차이일 뿐이다.
+//
+//   원인
+//    누적 조건이 "차폐 && 조준선 5° 안" 뿐이었다. 위 설계 의도는
+//    "따라다님"인데, 구현은 "겨누고 기다림"까지 셌다.
+//    모서리를 겨누고 그 뒤에 숨은 적을 기다리는 건 정상 플레이다.
+//
+//   수정 : 콘 안의 매 루프를 세 가지로 나눈다.
+//    Follow : 적이 스스로 각도상 움직이고(≥ MinTargetAngVelDeg),
+//             조준이 그 방향 변화를 FollowRatio 이상 따라갔다 → 누적
+//    Hold   : 콘 안이지만 적이 각도상 정지(서 있음, 시선 방향 이동),
+//             또는 직전 표본이 없어 판정 불가 → 누적 유지(증감 없음)
+//    Decay  : 그 외 (콘 밖, 보임, 적은 움직이는데 조준이 안 따라감) → 감쇠
+//
+//    "적 스스로의 각속도"는 직전 적 위치를 현재 눈에서 본 방향과
+//    현재 방향의 차이로 잰다. 관찰자가 옆으로 걸으며 정지한 적의
+//    마지막 위치를 계속 겨누는 건 사람도 하므로 Follow 로 세지 않는다.
+//
+//    조준과 적의 방향 변화는 단위벡터 차(소각 근사)로 비교한다.
+//    yaw 값이 아니라 벡터라서 0/360 경계 문제가 없다.
+//
+//   호환
+//    detail 문자열("OccludedTracking")과 code 는 그대로다.
+//    기존 쿼리·대시보드가 그대로 동작한다.
+//    수정 전 데이터(135/136)는 "수정 전 13건 → 수정 후 N건" 비교용으로 보존한다.
 // =====================================================================
 
 using System.Collections.Generic;
@@ -70,10 +103,30 @@ public static class VLos
     public const float FovHalfDeg = 55f;
 
     /// <summary>
-    /// 이 각도 안에서 차폐된 적을 겨누고 있으면 "추적"으로 센다.
+    /// 이 각도 안에서 차폐된 적을 겨누고 있어야 추적 후보가 된다.
     /// 잠정값. Day 5 실측 후 확정.
     /// </summary>
     public const float TrackConeDeg = 5f;
+
+    /// <summary>
+    /// W12 Day 3. 적이 "스스로" 이 각속도(°/s) 이상으로 움직여야
+    /// 따라다님을 판정한다. 이보다 느리면 Hold.
+    /// 20m 거리에서 옆걸음 0.7m/s 에 해당. 잠정값.
+    /// </summary>
+    public const float MinTargetAngVelDeg = 2f;
+
+    /// <summary>
+    /// W12 Day 3. 조준 방향 변화를 적 방향 변화에 투영한 비율.
+    /// 1 = 완전히 따라감, 0 = 고정, 음수 = 반대로 움직임.
+    /// 이 값 이상이면 Follow. 잠정값.
+    /// </summary>
+    public const float FollowRatio = 0.5f;
+
+    /// <summary>
+    /// W12 Day 3. 직전 표본과의 간격이 이보다 길면 비교하지 않는다(Hold).
+    /// 루프 정지(플레이어 1명) 뒤 재개 같은 경우의 오판을 막는다.
+    /// </summary>
+    public const float MaxStepSec = 0.25f;
 
     /// <summary>벽 표면 근접 허용 오차. 모서리 스치기 오탐을 줄인다.</summary>
     public const float OccludeMargin = 0.05f;
@@ -89,8 +142,8 @@ public static class VLos
 
     /// <summary>
     /// 위반으로 기록할 누적 임계(초). ★ 잠정값 ★
-    /// 사람도 벽 뒤 적의 마지막 위치를 몇 초 겨누고 기다릴 수 있으므로
-    /// Day 5 정상 플레이 실측 없이 이 숫자를 신뢰하면 안 된다.
+    /// W12 Day 3 부터는 "따라다닌 시간"만 누적되므로
+    /// 겨누고 기다리는 정상 플레이는 여기까지 오지 않는다.
     /// </summary>
     public const float TrackViolationSec = 2.0f;
 
@@ -127,8 +180,18 @@ public class VisibilitySystem : MonoBehaviour
         public long spotId;
         public float occludedTrackSec;  // 차폐 추적 누적
         public float peakTrackSec;      // 세션 내 최대치 (튜닝용)
-        public bool reported;          // 이번 에피소드에서 이미 보고했는가
+        public bool reported;           // 이번 에피소드에서 이미 보고했는가
+
+        // W12 Day 3 : 따라다님 판정용 직전 표본
+        public bool hasPrev;
+        public float prevAt;            // 직전 표본 시각 (realtime)
+        public Vector3 prevDir;         // 직전 눈→적 방향 (단위벡터)
+        public Vector3 prevAim;         // 직전 조준 방향 (단위벡터)
+        public Vector3 prevCenter;      // 직전 적 몸통 중심 (되감은 위치)
     }
+
+    /// <summary>W12 Day 3. 콘 안 한 루프의 분류.</summary>
+    private enum TrackStep { Decay, Hold, Follow }
 
     private readonly List<Entry> _entries = new();
     private readonly Dictionary<(ulong, ulong), Pair> _pairs = new();
@@ -145,6 +208,8 @@ public class VisibilitySystem : MonoBehaviour
     private int _noSampleCount;
     private int _spotCount;
     private int _violationCount;
+    private int _followSteps;   // W12 Day 3
+    private int _holdSteps;     // W12 Day 3
     private float _globalPeakTrack;
     private float _lastStatAt;
 
@@ -232,7 +297,7 @@ public class VisibilitySystem : MonoBehaviour
             if (a.health != null && a.health.IsDead) continue;
 
             Vector3 eye = a.ctrl.ServerEyePosition;
-            Vector3 aimDir = a.ctrl.ServerAimDirection;
+            Vector3 aimDir = a.ctrl.ServerAimDirection.normalized;
 
             // A 화면에 그려져 있는 시점. FireHitscan 과 같은 공식이다.
             int rtt = a.ctrl.ServerRttMs();
@@ -259,12 +324,20 @@ public class VisibilitySystem : MonoBehaviour
                 if (!b.rewind.TryBodyCenterAt(tRewind, out Vector3 center))
                 {
                     _noSampleCount++;      // 이력이 닿지 않는다. 판정 보류.
+                    // 직전 표본이 끊겼으니 다음 루프에서 비교하지 않는다.
+                    if (_pairs.TryGetValue(key, out Pair miss) && miss.hasPrev)
+                    {
+                        miss.hasPrev = false;
+                        _pairs[key] = miss;
+                    }
                     continue;
                 }
 
                 Vector3 to = center - eye;
                 float dist = to.magnitude;
                 if (dist < 0.01f) continue;
+
+                Vector3 dir = to / dist;
 
                 _pairs.TryGetValue(key, out Pair st);
 
@@ -274,11 +347,11 @@ public class VisibilitySystem : MonoBehaviour
                     UpdateVisibility(ref st, false, now);
                     st.occludedTrackSec = Decay(st.occludedTrackSec, dt);
                     ClearReportFlag(ref st);
+                    StorePrev(ref st, now, dir, aimDir, center);
                     _pairs[key] = st;
                     continue;
                 }
 
-                Vector3 dir = to / dist;
                 float angle = Vector3.Angle(aimDir, dir);
 
                 // --- 시야각 컬링 (Raycast 이전에 한다) ---
@@ -287,6 +360,7 @@ public class VisibilitySystem : MonoBehaviour
                     UpdateVisibility(ref st, false, now);
                     st.occludedTrackSec = Decay(st.occludedTrackSec, dt);
                     ClearReportFlag(ref st);
+                    StorePrev(ref st, now, dir, aimDir, center);
                     _pairs[key] = st;
                     continue;
                 }
@@ -302,43 +376,103 @@ public class VisibilitySystem : MonoBehaviour
                     EmitSpot(a, b, st.spotId, tick, dist, angle, rtt,
                              Mathf.RoundToInt(rewindSec * 1000f));
 
-                // --- 차폐 추적 누적 (V-LOS-01) ---
-                if (blocked && angle < VLos.TrackConeDeg)
+                // --- 차폐 추적 (V-LOS-01) : W12 Day 3 따라다님 판정 ---
+                TrackStep step = ClassifyTrack(in st, blocked, angle,
+                                               now, eye, dir, aimDir);
+
+                switch (step)
                 {
-                    st.occludedTrackSec =
-                        Mathf.Min(VLos.TrackCapSec, st.occludedTrackSec + dt);
+                    case TrackStep.Follow:
+                        _followSteps++;
+                        st.occludedTrackSec =
+                            Mathf.Min(VLos.TrackCapSec, st.occludedTrackSec + dt);
 
-                    if (st.occludedTrackSec > st.peakTrackSec)
-                        st.peakTrackSec = st.occludedTrackSec;
-                    if (st.occludedTrackSec > _globalPeakTrack)
-                        _globalPeakTrack = st.occludedTrackSec;
+                        if (st.occludedTrackSec > st.peakTrackSec)
+                            st.peakTrackSec = st.occludedTrackSec;
+                        if (st.occludedTrackSec > _globalPeakTrack)
+                            _globalPeakTrack = st.occludedTrackSec;
 
-                    // 에피소드당 한 번만 보고한다.
-                    if (!st.reported && st.occludedTrackSec >= VLos.TrackViolationSec)
-                    {
-                        st.reported = true;
-                        _violationCount++;
-                        ViolationLogger.Report(
-                            clientId: a.clientId,
-                            playerUid: a.Uid,
-                            code: VLos.CODE,
-                            tick: tick,
-                            severity: VLos.Severity,
-                            detail: "OccludedTracking",
-                            rttMs: rtt);
-                    }
+                        // 에피소드당 한 번만 보고한다.
+                        if (!st.reported && st.occludedTrackSec >= VLos.TrackViolationSec)
+                        {
+                            st.reported = true;
+                            _violationCount++;
+                            ViolationLogger.Report(
+                                clientId: a.clientId,
+                                playerUid: a.Uid,
+                                code: VLos.CODE,
+                                tick: tick,
+                                severity: VLos.Severity,
+                                detail: "OccludedTracking",
+                                rttMs: rtt);
+                        }
+                        break;
+
+                    case TrackStep.Hold:
+                        // 겨누고 기다림. 증거도 반증도 아니다. 누적을 그대로 둔다.
+                        _holdSteps++;
+                        break;
+
+                    default:
+                        st.occludedTrackSec = Decay(st.occludedTrackSec, dt);
+                        ClearReportFlag(ref st);
+                        break;
                 }
-                else
-                {
-                    st.occludedTrackSec = Decay(st.occludedTrackSec, dt);
-                    ClearReportFlag(ref st);
-                }
 
+                StorePrev(ref st, now, dir, aimDir, center);
                 _pairs[key] = st;
             }
         }
 
         EmitStats(now);
+    }
+
+    /// <summary>
+    /// W12 Day 3. 콘 안 한 루프를 Follow / Hold / Decay 로 나눈다.
+    ///
+    ///  1) 차폐가 아니거나 콘 밖          → Decay
+    ///  2) 직전 표본 없음·간격 비정상      → Hold (판정할 수 없으면 무죄)
+    ///  3) 적 스스로의 각속도 < 하한      → Hold (서 있음, 시선 방향 이동)
+    ///  4) 조준이 적 방향 변화를 따라감   → Follow
+    ///     아니면                        → Decay
+    /// </summary>
+    private static TrackStep ClassifyTrack(in Pair st, bool blocked, float angle,
+                                           float now, Vector3 eye,
+                                           Vector3 dir, Vector3 aimDir)
+    {
+        if (!blocked || angle >= VLos.TrackConeDeg) return TrackStep.Decay;
+
+        float stepDt = now - st.prevAt;
+        if (!st.hasPrev || stepDt <= 0f || stepDt > VLos.MaxStepSec)
+            return TrackStep.Hold;
+
+        // 적 스스로의 움직임: 직전 적 위치를 "현재 눈"에서 본 방향 vs 현재 방향.
+        // 관찰자 이동분이 빠지므로, 옆걸음 치며 정지한 적을 겨누는 건 여기서 걸러진다.
+        Vector3 prevFromNow = st.prevCenter - eye;
+        float pd = prevFromNow.magnitude;
+        if (pd < 0.01f) return TrackStep.Hold;
+
+        float ownAngVel = Vector3.Angle(prevFromNow / pd, dir) / stepDt;
+        if (ownAngVel < VLos.MinTargetAngVelDeg) return TrackStep.Hold;
+
+        // 따라감: 조준 방향 변화를 적 방향 변화에 투영한 비율 (소각 근사).
+        Vector3 dTarget = dir - st.prevDir;
+        float d2 = dTarget.sqrMagnitude;
+        if (d2 < 1e-10f) return TrackStep.Hold;
+
+        float follow = Vector3.Dot(aimDir - st.prevAim, dTarget) / d2;
+        return follow >= VLos.FollowRatio ? TrackStep.Follow : TrackStep.Decay;
+    }
+
+    /// <summary>W12 Day 3. 다음 루프의 비교 기준을 남긴다.</summary>
+    private static void StorePrev(ref Pair st, float now,
+                                  Vector3 dir, Vector3 aimDir, Vector3 center)
+    {
+        st.hasPrev = true;
+        st.prevAt = now;
+        st.prevDir = dir;
+        st.prevAim = aimDir;
+        st.prevCenter = center;
     }
 
     private static float Decay(float v, float dt)
@@ -392,6 +526,7 @@ public class VisibilitySystem : MonoBehaviour
         st.lostAt = 0f;
         st.occludedTrackSec = 0f;
         st.reported = false;
+        st.hasPrev = false;   // W12 Day 3 : 리스폰 위치와 비교하지 않는다
         _pairs[key] = st;
     }
 
@@ -440,12 +575,15 @@ public class VisibilitySystem : MonoBehaviour
         Debug.Log($"[LOS] players={_entries.Count} pairs={_pairs.Count} " +
                   $"rays/s={_rayCount / span:F0} spots={_spotCount} " +
                   $"noSample={_noSampleCount} viol={_violationCount} " +
+                  $"follow={_followSteps} hold={_holdSteps} " +
                   $"peakTrack={_globalPeakTrack:F2}s");
 
         _rayCount = 0;
         _noSampleCount = 0;
         _spotCount = 0;
         _violationCount = 0;
+        _followSteps = 0;
+        _holdSteps = 0;
     }
 
     // -----------------------------------------------------------------
@@ -462,7 +600,7 @@ public class VisibilitySystem : MonoBehaviour
         return true;
     }
 
-    /// <summary>A 가 차폐된 B 를 좁은 각도로 추적한 누적 시간(초).</summary>
+    /// <summary>A 가 차폐된 B 를 따라다닌 누적 시간(초). W12 Day 3 부터 의미가 좁아졌다.</summary>
     public float GetOccludedTrackSec(ulong observer, ulong target)
         => _pairs.TryGetValue((observer, target), out var st) ? st.occludedTrackSec : 0f;
 
