@@ -142,3 +142,7 @@ game/telemetry/
 tools/dashboard/bin/
 tools/dashboard/obj/
 tools/dashboard/publish/
+
+# .NET 빌드 산출물
+tools/*/bin/
+tools/*/obj/
