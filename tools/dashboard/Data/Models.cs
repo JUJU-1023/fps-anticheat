@@ -140,6 +140,21 @@ public sealed class PlayerRow : CombatStats
     public string BanStatus { get; init; } = "";
     public bool IsBanned => BanStatus.Length > 0;
 
+    // ★ W13 L3 Trust Score ─────────────────────────────
+    public int? TrustScore { get; init; }      // 0~100, 점수 없으면 null
+    public string Tier { get; init; } = "";    // normal/watch/shadow/banned, 없으면 ""
+
+    public string TrustText => TrustScore is int t ? t.ToString() : "—";
+    public string TierText => Tier switch
+    {
+        "banned" => "BANNED",
+        "shadow" => "SHADOW",
+        "watch" => "WATCH",
+        "normal" => "정상",
+        _ => "—",
+    };
+    // ───────────────────────────────────────────────────
+
     public string PlayerText => $"#{PlayerId} {Name}";
     public string BotText => IsBot ? "BOT" : "";
     public string FirstSeenText => FirstSeenKst.ToString("MM-dd HH:mm");

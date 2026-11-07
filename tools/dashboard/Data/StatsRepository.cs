@@ -13,6 +13,7 @@ namespace AntiCheatDashboard.Data;
 ///   킬     = KILL 행 수 (player_id = 쏜 사람)
 ///   데스   = KILL 행의 target_id = 이 플레이어
 ///   위반   = SUM(occurrences)
+///   L3     = ml_scores의 플레이어별 가장 최근 세션 trust_score·tier (W13)
 /// </summary>
 public static class StatsRepository
 {
@@ -164,7 +165,7 @@ ORDER BY p.is_bot, p.id";
         cmd.CommandText = $@"
 SELECT p.id, p.display_name, p.player_uid, p.is_bot, p.first_seen, p.last_seen,
        s.matches, s.fires, s.hits, s.heads, s.kills, d.deaths, s.avg_rtt,
-       b.permanent, b.until_utc
+       b.permanent, b.until_utc, l3.trust_score, l3.tier
 FROM players p
 LEFT JOIN (
     SELECT player_id,
@@ -196,6 +197,15 @@ LEFT JOIN (
       AND (expires_at IS NULL OR expires_at > NOW(3))
     GROUP BY player_id
 ) b ON b.player_id = p.id
+LEFT JOIN (
+    -- ★ W13 L3: 플레이어의 가장 최근 세션 Trust Score
+    SELECT x.player_id, x.trust_score, x.tier
+    FROM ml_scores x
+    JOIN (
+        SELECT player_id, MAX(scored_at) AS mx
+        FROM ml_scores GROUP BY player_id
+    ) m2 ON m2.player_id = x.player_id AND m2.mx = x.scored_at
+) l3 ON l3.player_id = p.id
 WHERE 1=1 {playerEx} {botSql}
 ORDER BY p.is_bot, p.id";
 
@@ -226,6 +236,9 @@ ORDER BY p.is_bot, p.id";
                     Deaths = Rd.L(rd, 11),
                     AvgRtt = Rd.D(rd, 12),
                     BanStatus = ban,
+                    // ★ W13 L3 (컬럼 15·16)
+                    TrustScore = Rd.S(rd, 15) is string ts ? int.Parse(ts) : (int?)null,
+                    Tier = Rd.S(rd, 16) ?? "",
                 });
             }
         }

@@ -35,6 +35,18 @@
                 <DataGrid.RowStyle>
                     <Style TargetType="DataGridRow">
                         <Style.Triggers>
+                            <!-- ★ W13 L3 tier 색상. 위반·밴 트리거보다 먼저 두어, 밴이 걸린 행은 아래 밴 색이 우선되게 함 -->
+                            <DataTrigger Binding="{Binding Tier}" Value="watch">
+                                <Setter Property="Background" Value="#FFF9E0" />
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding Tier}" Value="shadow">
+                                <Setter Property="Background" Value="#FFE9D0" />
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding Tier}" Value="banned">
+                                <Setter Property="Background" Value="#FFD6D6" />
+                                <Setter Property="FontWeight" Value="SemiBold" />
+                            </DataTrigger>
+                            <!-- 기존: 위반·밴 -->
                             <DataTrigger Binding="{Binding HasViolations}" Value="True">
                                 <Setter Property="Background" Value="#FFF4E0" />
                             </DataTrigger>
@@ -59,6 +71,9 @@
                     <DataGridTextColumn Header="K/D" Binding="{Binding KdText}" Width="50" />
                     <DataGridTextColumn Header="위반 합계" Binding="{Binding ViolationTotal, StringFormat=N0}" Width="72" />
                     <DataGridTextColumn Header="코드별 위반" Binding="{Binding ViolationText}" Width="*" MinWidth="160" />
+                    <!-- ★ W13 L3 Trust Score -->
+                    <DataGridTextColumn Header="Trust" Binding="{Binding TrustText}" Width="52" SortMemberPath="TrustScore" />
+                    <DataGridTextColumn Header="L3" Binding="{Binding TierText}" Width="66" SortMemberPath="Tier" />
                     <DataGridTextColumn Header="상태" Binding="{Binding BanStatus}" Width="120" />
                 </DataGrid.Columns>
             </DataGrid>

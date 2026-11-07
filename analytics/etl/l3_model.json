@@ -1,0 +1,64 @@
+{
+  "aim": {
+    "feats": [
+      [
+        "aim_err_std",
+        -1
+      ],
+      [
+        "aim_err_mean",
+        -1
+      ],
+      [
+        "aim_err_min",
+        -1
+      ]
+    ],
+    "params": {
+      "aim_err_std": {
+        "median": 0.9529267806121864,
+        "mad": 0.7420640794983975
+      },
+      "aim_err_mean": {
+        "median": 1.615614052861929,
+        "mad": 0.5459960795721334
+      },
+      "aim_err_min": {
+        "median": 0.23903,
+        "mad": 0.12754807800000004
+      }
+    },
+    "tier": {
+      "watch": 1.3,
+      "shadow": 1.6,
+      "banned": 2.0
+    }
+  },
+  "esp": {
+    "feats": [
+      [
+        "occ_aim_mean",
+        1
+      ],
+      [
+        "occ_aim_max",
+        1
+      ]
+    ],
+    "params": {
+      "occ_aim_mean": {
+        "median": 0.073132245,
+        "mad": 0.070065437274
+      },
+      "occ_aim_max": {
+        "median": 0.2422,
+        "mad": 0.20467293
+      }
+    },
+    "tier": {
+      "watch": 2.0,
+      "shadow": 4.0,
+      "banned": 6.0
+    }
+  }
+}
