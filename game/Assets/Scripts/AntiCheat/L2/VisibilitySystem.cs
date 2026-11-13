@@ -233,13 +233,22 @@ public class VisibilitySystem : MonoBehaviour
 
         // 벽만 본다. 플레이어 본체(Player)와 히트박스(Hitbox)는 제외한다.
         // 히트박스가 섞이면 다른 플레이어가 시야를 가린 것을 벽으로 오인한다.
+        //
+        // W14: 맵 벽이 Wall 레이어라 Default 만 보면 벽 뒤 적을 "보이는 적"으로 판정했다.
+        //      → V-LOS 차폐 추적 미탐지, SPOT 시점이 앞당겨져 V-TIME 반응시간이 수 초로 측정됨.
+        //      Default 와 Wall 을 모두 벽으로 본다.
+        _worldMask = 0;
+
         int world = LayerMask.NameToLayer("Default");
-        if (world < 0)
-        {
-            Debug.LogError("[LOS] 'Default' 레이어를 찾을 수 없다.");
-            _worldMask = 0;
-        }
-        else _worldMask = 1 << world;
+        if (world >= 0) _worldMask |= 1 << world;
+
+        int wall = LayerMask.NameToLayer("Wall");
+        if (wall >= 0) _worldMask |= 1 << wall;
+
+        if (_worldMask == 0)
+            Debug.LogError("[LOS] 'Default'/'Wall' 레이어를 찾을 수 없다.");
+        else
+            Debug.Log($"[LOS] worldMask=0x{_worldMask:X} (Default={world}, Wall={wall})");
 
         _lastStatAt = Time.realtimeSinceStartup;
     }

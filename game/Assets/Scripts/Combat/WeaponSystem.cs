@@ -342,6 +342,16 @@ public class WeaponSystem : NetworkBehaviour
             $"[WEAPON] '{WeaponConfig.HitboxLayerName}' 레이어가 없다. " +
             "Project Settings > Tags and Layers 에서 만들어야 한다. " +
             "이 레이어가 없으면 되감기가 히트 판정에 전혀 반영되지 않는다.");
+
+        // W14: 맵 벽이 Wall 레이어라 WorldLayerName(Default)만 보면 벽을 관통했다.
+        //      명중 판정과 BlockedHit 확인선 모두 Wall 도 벽으로 본다.
+        int wall = LayerMask.NameToLayer("Wall");
+        if (wall >= 0)
+        {
+            _worldMask |= 1 << wall;
+            _raycastMask |= 1 << wall;
+        }
+       
     }
 
     // -----------------------------------------------------------------
